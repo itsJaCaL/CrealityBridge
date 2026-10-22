@@ -11,6 +11,6 @@ Connect **any** Klipper/Moonraker 3D printer (Raspberry Pi, BTT CB1/Manta, Sonic
 SSH into your Klipper host (or remote video server) and run:
 
 ```bash
-git clone [https://github.com/YOUR_GITHUB_USERNAME/creality-klipper-bridge.git](https://github.com/YOUR_GITHUB_USERNAME/creality-klipper-bridge.git)
+git clone [https://github.com/itsJaCaL/creality-klipper-bridge.git](https://github.com/itsJaCaL/creality-klipper-bridge.git)
 cd creality-klipper-bridge
 bash install.sh
