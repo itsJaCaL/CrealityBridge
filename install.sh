@@ -6,11 +6,11 @@ set -e
 # ==============================================================================
 
 # Replace this URL with your own GitHub raw URL once you upload the repo!
-REPO_RAW_URL="https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/creality-klipper-bridge/main"
+REPO_RAW_URL="https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/CrealityBridge/main"
 
 CURRENT_USER="${USER:-$(whoami)}"
 USER_HOME=$(eval echo "~$CURRENT_USER")
-INSTALL_DIR="$USER_HOME/creality-klipper-bridge"
+INSTALL_DIR="$USER_HOME/CrealityBridge"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "============================================================"
@@ -46,12 +46,14 @@ fi
 
 mkdir -p "$INSTALL_DIR/bridge" "$INSTALL_DIR/video-relay"
 
-# Helper to copy from local clone if available, otherwise download from GitHub
 fetch_file() {
     local rel_path="$1"
     local dest_path="$2"
-    if [[ -f "$SCRIPT_DIR/$rel_path" ]]; then
-        cp "$SCRIPT_DIR/$rel_path" "$dest_path"
+    local src_path="$SCRIPT_DIR/$rel_path"
+    if [[ -f "$src_path" ]]; then
+        if [[ "$(realpath "$src_path" 2>/dev/null)" != "$(realpath "$dest_path" 2>/dev/null)" ]]; then
+            cp "$src_path" "$dest_path"
+        fi
     else
         curl -sSL "$REPO_RAW_URL/$rel_path" -o "$dest_path"
     fi
@@ -62,16 +64,28 @@ fetch_file() {
 # ==============================================================================
 if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
     echo ""
-    echo "--- Bridge Configuration ---"
-    while [[ -z "$TB_TOKEN" ]]; do
-        read -p "Enter your Creality Cloud Key (TB_TOKEN): " TB_TOKEN
+    echo "============================================================"
+    echo "               CREALITY CLOUD AUTHENTICATION                "
+    echo "============================================================"
+    echo "To connect your printer:"
+    echo "  1. Go to Creality Cloud -> Devices -> Add Device (Raspberry Pi/Klipper)."
+    echo "  2. Download the key files."
+    echo "  3. Open the downloaded .tk file with a text editor and copy the text inside."
+    echo "============================================================"
+    echo ""
+
+    while [[ -z "$JWT_TOKEN" ]]; do
+        read -p "Paste the contents of your .tk file (Token): " JWT_TOKEN
     done
+
+    # Generate an initial random unique device identifier for dynamic registration
+    RANDOM_KEY="CC_$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)"
 
     read -p "Enter a display name for your printer [default: Klipper-Printer]: " PRINTER_NAME
     PRINTER_NAME="${PRINTER_NAME:-Klipper-Printer}"
 
     echo ""
-    echo "Select Printer Model Profile (Controls which UI features unlock in Creality Cloud):"
+    echo "Select Printer Model Profile:"
     echo "  [1] K2 Plus       (Unlocks ALL flagship controls: Flow, Speed, Extrude/Retract, Fans, CFS)"
     echo "  [2] K1 Max        (Unlocks full high-speed Klipper controls: Flow, Speed, Extrude/Retract)"
     echo "  [3] Ender-3 V3 KE (Standard Klipper bed-slinger profile)"
@@ -115,7 +129,8 @@ if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
 
     cat << EOF > "$INSTALL_DIR/bridge/config.json"
 {
-    "tb_token": "$TB_TOKEN",
+    "tb_token": "$RANDOM_KEY",
+    "jwt_token": "$JWT_TOKEN",
     "broker": "mqtt.crealitycloud.com",
     "moonraker_url": "$MOONRAKER_URL",
     "printer_name": "$PRINTER_NAME",
@@ -162,7 +177,6 @@ if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
         read -p "Enter your Klipper Printer's IP address (e.g., 192.168.50.157): " PRINTER_IP
         DEFAULT_CAM_URL="http://${PRINTER_IP}/webcam/?action=stream"
     else
-        # Try auto-detecting local stream path from Moonraker
         DETECTED_STREAM=$(curl -s "http://127.0.0.1:7125/server/webcams/list" | grep -o '"/webcam/[^"]*"' | head -n 1 | tr -d '"')
         if [[ -n "$DETECTED_STREAM" ]]; then
             DEFAULT_CAM_URL="http://127.0.0.1${DETECTED_STREAM}"
@@ -187,7 +201,6 @@ if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
         *) ROT_DEG=0 ;;
     esac
 
-    # Ensure 2GB Swap on low-RAM systems (<2.5GB RAM) to prevent OOM Kills
     TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     TOTAL_SWAP_KB=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
     if [[ "$TOTAL_MEM_KB" -lt 2500000 && "$TOTAL_SWAP_KB" -lt 1000000 ]]; then
@@ -201,7 +214,7 @@ if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
         fi
     fi
 
-    echo "[*] Installing system packages for WebRTC & PyAV..."
+    echo "[*] Installing system packages for WebRTC & OpenCV..."
     sudo apt-get update
     sudo apt-get install -y python3-venv python3-pip python3-dev ffmpeg \
         libavdevice-dev libavfilter-dev libopus-dev libvpx-dev pkg-config \
@@ -211,7 +224,7 @@ if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
     python3 -m venv "$INSTALL_DIR/video-relay/venv_video"
     source "$INSTALL_DIR/video-relay/venv_video/bin/activate"
     pip install --upgrade pip
-    pip install aiortc aiohttp websockets websocket-client requests paho-mqtt "numpy<2"
+    pip install aiortc aiohttp websockets websocket-client requests paho-mqtt "numpy<2" opencv-python-headless
 
     echo "[*] Downloading official signaling channel and relay scripts..."
     curl -sSL "https://raw.githubusercontent.com/crealitycloud/OctoPrint-CrealityCloud-With-Video/master/octoprint_crealitycloud/signaling_channel.py" \
