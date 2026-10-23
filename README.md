@@ -66,3 +66,23 @@ Check your background service logs or remove the bridge anytime using these comm
   ```bash
   bash install.sh --uninstall
   ```
+
+---
+
+## 🖨️ Creality Cloud Official Model Profile Identifiers
+
+When selecting your printer profile during installation or mapping it in your config, these are the primary model strings recognized by Creality Cloud to unlock specific UI controls (such as high-speed Klipper tuning, pressure advance, or standard bed-slinger layouts):
+
+* **Flagship High-Speed Series:**
+  * `K2 Plus` *(Unlocks full flagship controls: Flow, Speed, Extrude/Retract, Fans, CFS)*
+  * `K1 Max` *(Unlocks full high-speed Klipper controls)*
+  * `K1`, `K1C`, `K1 SE`
+* **Modern Bed-Slingers:**
+  * `Ender-3 V3`, `Ender-3 V3 KE`, `Ender-3 V3 SE`
+  * `Ender-3 S1 Pro`, `Ender-3 S1`
+* **Classic & Community Machines (Map to standard profiles or Custom):**
+  * `Ender-3 V2`, `Ender-3 Pro`, `Ender-3`
+  * `Ender-5 Plus`, `Ender-5 S1`
+  * `CR-10 SE`, `CR-10 Smart Pro`
+* **Custom / DIY / Voron Builds:**
+  * Use option `[5]` (Custom Model Name) during the installer to input any custom string (e.g., `Voron 2.4`, `Mercury One.1`, or `Custom CoreXY`) if you want a custom title displayed on your Creality Cloud dashboard.
