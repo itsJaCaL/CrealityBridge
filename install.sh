@@ -7,8 +7,19 @@ set -e
 
 REPO_RAW_URL="https://raw.githubusercontent.com/itsJaCaL/CrealityBridge/main"
 
-CURRENT_USER="${USER:-$(whoami)}"
-USER_HOME=$(eval echo "~$CURRENT_USER")
+# Detect the real user even if run via sudo
+if [ -n "$SUDO_USER" ]; then
+    CURRENT_USER="$SUDO_USER"
+else
+    CURRENT_USER="${USER:-$(whoami)}"
+fi
+
+if [ "$CURRENT_USER" = "root" ]; then
+    USER_HOME="/root"
+else
+    USER_HOME=$(eval echo "~$CURRENT_USER")
+fi
+
 INSTALL_DIR="$USER_HOME/CrealityBridge"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
