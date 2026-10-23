@@ -1,33 +1,25 @@
 # -*- coding: utf-8 -*-
-import json, time, requests, threading, os, gzip, sys, re, socket
+import json, time, requests, threading, os, sys, uuid, random, socket, subprocess
 import paho.mqtt.client as mqtt
 
-# Load user configuration from config.json
+# --- CONFIGURATION ---
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 with open(CONFIG_PATH, "r") as f:
     CONFIG = json.load(f)
 
 TB_TOKEN = CONFIG.get("tb_token", "")
+JWT_TOKEN = CONFIG.get("jwt_token", "")
 BROKER = CONFIG.get("broker", "mqtt.crealitycloud.com")
 MOONRAKER = CONFIG.get("moonraker_url", "http://127.0.0.1:7125").rstrip("/")
-PRINTER_NAME = CONFIG.get("printer_name", "Klipper-Printer")
+PRINTER_NAME = CONFIG.get("printer_name", "Chris")
 PRINTER_MODEL = CONFIG.get("printer_model", "K1 Max")
-VIDEO_ENABLED = CONFIG.get("video_enabled", False)
-VIDEO_RELAY_URL = CONFIG.get("video_relay_url", "http://127.0.0.1:8555/control")
 
+# --- GLOBALS ---
 CURRENT_PRINT_ID = ""
-LAST_STATE = ""
 CURRENT_FAN_STATE = 0
 CURRENT_LED_STATE = 0
-COMPLETION_BROADCAST_TIME = 0
-PRINT_START_TIMESTAMP = 0
-IS_DOWNLOADING = False
-DOWNLOAD_PROGRESS = 100
-FILENAME_MAP = {}
-
-ACTIVE_TOKEN = ""
-ACTIVE_JWT_TOKEN = ""
 ACTIVE_LIVESTREAM = 0
+ACTIVE_JWT_TOKEN = JWT_TOKEN
 
 def log(msg):
     print(msg, flush=True)
@@ -44,95 +36,33 @@ def get_local_ip():
 
 def moonraker_post(endpoint, payload=None):
     try:
-        url = f"{MOONRAKER}{endpoint}"
-        res = requests.post(url, json=payload if payload else {}, timeout=10)
-        if res.status_code == 200:
-            error = res.json().get("error")
-            if error:
-                log(f"[Klipper Notice] {error.get('message', 'Command ignored by Klipper')}")
-        return res
-    except Exception:
+        return requests.post(f"{MOONRAKER}{endpoint}", json=payload or {}, timeout=5)
+    except:
         return None
 
 def send_gcode(cmd):
     return moonraker_post("/printer/gcode/script", {"script": cmd})
 
-def klipper_console_echo(msg):
-    safe_msg = str(msg).replace('"', "'")
-    send_gcode(f'M118 [Creality Cloud] {safe_msg}')
-
 def get_klipper_pos():
     try:
-        res = requests.get(f"{MOONRAKER}/printer/objects/query?toolhead", timeout=3)
-        if res.status_code == 200:
-            pos = res.json().get("result", {}).get("status", {}).get("toolhead", {}).get("position", [0.0, 0.0, 0.0])
-            return f"X:{pos[0]:.2f} Y:{pos[1]:.2f} Z:{pos[2]:.2f}"
-    except Exception:
-        pass
-    return "X:0.00 Y:0.00 Z:0.00"
+        res = requests.get(f"{MOONRAKER}/printer/objects/query?toolhead", timeout=2)
+        pos = res.json()["result"]["status"]["toolhead"]["position"]
+        return f"X:{pos[0]:.2f} Y:{pos[1]:.2f} Z:{pos[2]:.2f}"
+    except:
+        return "X:0.00 Y:0.00 Z:0.00"
 
-def get_host_temp():
-    try:
-        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-            return round(float(f.read().strip()) / 1000.0, 1)
-    except Exception:
-        return 0.0
-
-def sanitize_filename(raw_name):
-    no_spaces = raw_name.replace(" ", "_").replace("/", "_")
-    cleaned = re.sub(r"[^a-zA-Z0-9_\-.]", "", no_spaces)
-    FILENAME_MAP[cleaned] = raw_name
-    return cleaned
-
-def resolve_filename(cloud_name):
-    return FILENAME_MAP.get(cloud_name, cloud_name)
-
-def extract_real_gcode_name(filepath, rpc_params, fallback_name):
-    # 1. Check if Creality sent the human-readable name in the MQTT RPC payload
-    for key in ("fileName", "filename", "name", "modelName", "title"):
-        val = rpc_params.get(key)
-        if val and isinstance(val, str) and not val.startswith("http"):
-            clean = re.sub(r"[^a-zA-Z0-9_\-.]", "_", val.strip())
-            if not clean.lower().endswith(".gcode"):
-                clean += ".gcode"
-            return clean
-
-    # 2. Inspect the first 150 lines of the G-code header for slicer filename comments
-    patterns = [
-        r";\s*source_info\s*:\s*(.+)",
-        r";\s*filename\s*=\s*(.+)",
-        r";\s*input_filename_base\s*=\s*(.+)",
-        r";\s*FILE_NAME\s*:\s*(.+)",
-        r";\s*Name\s*:\s*(.+)"
-    ]
-    try:
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-            for _ in range(150):
-                line = f.readline()
-                if not line:
-                    break
-                for pat in patterns:
-                    m = re.search(pat, line, re.IGNORECASE)
-                    if m:
-                        candidate = m.group(1).strip().strip('"').strip("'")
-                        candidate = os.path.basename(candidate)
-                        clean = re.sub(r"[^a-zA-Z0-9_\-.]", "_", candidate)
-                        if clean:
-                            if not clean.lower().endswith(".gcode"):
-                                clean += ".gcode"
-                            return clean
-    except Exception:
-        pass
-    return fallback_name
+def sanitize_filename(p):
+    if not p: return ""
+    return p.lstrip("/").replace("gcodes/", "")
 
 def get_clean_moonraker_files():
     try:
         res = requests.get(f"{MOONRAKER}/server/files/list?root=gcodes", timeout=5)
         if res.status_code == 200:
-            all_files = res.json().get("result", [])
-            clean_files = [f for f in all_files if f.get("path", "").endswith(".gcode")]
-            return sorted(clean_files, key=lambda x: x.get("modified", 0), reverse=True)
-    except Exception:
+            files = res.json()["result"]
+            files.sort(key=lambda x: x.get("modified", 0), reverse=True)
+            return files
+    except:
         pass
     return []
 
@@ -140,7 +70,7 @@ def get_paged_files(page_idx, origin=0):
     clean_files = get_clean_moonraker_files()
     pages = [clean_files[i:i + 5] for i in range(0, len(clean_files), 5)]
     if not pages:
-        return {"tf": 1, "fileinfo": "", "pageindex": 0}
+        return {"tf": origin, "fileinfo": "", "pageindex": 0}
     if page_idx < len(pages):
         selected = pages[page_idx]
         prefix = "/usb:" if origin == 1 else "/local:"
@@ -150,16 +80,15 @@ def get_paged_files(page_idx, origin=0):
             fsize = int(f.get("size", 0))
             fdate = int(f.get("modified", 0))
             fileinfo_str += f"{prefix}{safe_name}:{fsize}:{fdate};"
-        return {"tf": 1, "fileinfo": fileinfo_str, "pageindex": page_idx}
-    return {"tf": 1, "fileinfo": "", "pageindex": page_idx}
+        return {"tf": origin, "fileinfo": fileinfo_str, "pageindex": page_idx}
+    return {"tf": origin, "fileinfo": "", "pageindex": page_idx}
 
 def get_web_file_array(page_num_1based, origin=0):
     clean_files = get_clean_moonraker_files()
     page_size = 10
     pages = [clean_files[i:i + page_size] for i in range(0, len(clean_files), page_size)]
     idx = max(0, int(page_num_1based) - 1)
-    if idx >= len(pages):
-        return []
+    if idx >= len(pages): return []
     path_prefix = "/usb" if origin == 1 else "/local"
     result = []
     for f in pages[idx]:
@@ -173,230 +102,144 @@ def get_web_file_array(page_num_1based, origin=0):
         })
     return result
 
-def cancel_print_job(client):
-    global CURRENT_PRINT_ID, PRINT_START_TIMESTAMP
-    log("[!] Aborting print job...")
-    res = moonraker_post("/printer/print/cancel")
-    if not res or res.status_code != 200:
-        send_gcode("CANCEL_PRINT")
-    CURRENT_PRINT_ID = ""
-    PRINT_START_TIMESTAMP = 0
-    client.publish("v1/devices/me/attributes", json.dumps({"state": 4, "stop": 1, "mcu_is_print": 0, "printProgress": 0}))
-
-def pause_print_job(client, do_pause):
-    if do_pause:
-        moonraker_post("/printer/print/pause")
-        client.publish("v1/devices/me/attributes", json.dumps({"state": 5, "pause": 1}))
-    else:
-        moonraker_post("/printer/print/resume")
-        client.publish("v1/devices/me/attributes", json.dumps({"state": 1, "pause": 0}))
-
-def download_and_print(url, client, rpc_params=None):
-    global CURRENT_PRINT_ID, IS_DOWNLOADING, DOWNLOAD_PROGRESS, PRINT_START_TIMESTAMP
-    if rpc_params is None:
-        rpc_params = {}
+def import_cloud_device():
+    global TB_TOKEN
     try:
-        IS_DOWNLOADING = True
-        DOWNLOAD_PROGRESS = 0
-        temp_filename = url.split("/")[-1].split("?")[0]
-        temp_path = os.path.join("/tmp", temp_filename)
-
-        res = requests.get(url, stream=True, timeout=20)
-        total_length = int(res.headers.get('content-length', 0))
-        downloaded = 0
-
-        with open(temp_path, "wb") as f:
-            for chunk in res.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_length > 0:
-                        DOWNLOAD_PROGRESS = int((downloaded / total_length) * 100)
-
-        DOWNLOAD_PROGRESS = 100
-        IS_DOWNLOADING = False
-        raw_filename = temp_filename.replace(".gz", "")
-        final_path = os.path.join("/tmp", raw_filename)
-
-        if temp_filename.endswith(".gz"):
-            with gzip.open(temp_path, "rb") as f_in, open(final_path, "wb") as f_out:
-                f_out.write(f_in.read())
-        else:
-            final_path = temp_path
-
-        # Smart Filename Extraction (Option 1)
-        final_filename = extract_real_gcode_name(final_path, rpc_params, raw_filename)
-        log(f"[*] Uploading as '{final_filename}' to Moonraker...")
-
-        with open(final_path, "rb") as f:
-            requests.post(f"{MOONRAKER}/server/files/upload", data={"root": "gcodes"}, files={"file": (final_filename, f)}, timeout=30)
-
-        start_res = moonraker_post("/printer/print/start", {"filename": final_filename})
-        if start_res and start_res.status_code == 200:
-            PRINT_START_TIMESTAMP = int(time.time())
-            safe_name = sanitize_filename(final_filename)
-            client.publish("v1/devices/me/attributes", json.dumps({
-                "state": 1, "mcu_is_print": 1, "filename": safe_name, "print": safe_name,
-                "printId": CURRENT_PRINT_ID, "printStartTime": str(PRINT_START_TIMESTAMP)
-            }))
-        else:
-            CURRENT_PRINT_ID = ""
-            client.publish("v1/devices/me/attributes", json.dumps({"state": 0, "mcu_is_print": 0}))
-
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        if temp_path != final_path and os.path.exists(final_path):
-            os.remove(final_path)
+        if not JWT_TOKEN:
+            return
+        url = "https://api.crealitycloud.com/api/cxy/v2/device/user/importDevice"
+        req_id = "Raspberry" + str(int(time.time()) % 10000) + "10" + str(int(random.random() * 89999 + 10000))
+        headers = {
+            "Content-Type": "application/json",
+            "__CXY_JWTOKEN_": JWT_TOKEN,
+            "__CXY_OS_VER_": "v0.0.1",
+            "_CXY_OS_LANG_": "1",
+            "__CXY_PLATFORM_": "5",
+            "__CXY_DUID_": "234",
+            "__CXY_APP_ID_": "creality_model",
+            "__CXY_REQUESTID_": req_id
+        }
+        mac = uuid.UUID(int=uuid.getnode()).hex[-12:].upper()
+        data = json.dumps({"mac": mac, "iotType": 1, "deviceName": PRINTER_MODEL})
+        res = requests.post(url, data=data, headers=headers, timeout=5)
+        res_json = res.json()
+        log(f"[*] Cloud Import Response: {res.text}")
+        if res_json.get("code") == 0 and res_json.get("result"):
+            new_tb = res_json["result"].get("tbToken")
+            if new_tb:
+                TB_TOKEN = new_tb
+                log(f"[*] Dynamically acquired provisioned tbToken: {TB_TOKEN}")
+                try:
+                    CONFIG["tb_token"] = new_tb
+                    with open(CONFIG_PATH, "w") as cf:
+                        json.dump(CONFIG, cf, indent=4)
+                except Exception as se:
+                    log(f"[-] Could not persist tbToken to config.json: {se}")
     except Exception as e:
-        log(f"[-] Download/Print Error: {e}")
-        IS_DOWNLOADING = False
-        DOWNLOAD_PROGRESS = 100
-        CURRENT_PRINT_ID = ""
-
-def forward_video_token(t_val, ls_val):
-    if not VIDEO_ENABLED:
-        return
-    try:
-        requests.post(VIDEO_RELAY_URL, json={"token": t_val, "livestream": ls_val}, timeout=0.5)
-    except Exception:
-        pass
+        log(f"[-] Cloud Import Exception: {e}")
 
 def on_message(client, userdata, msg):
-    global CURRENT_PRINT_ID, CURRENT_FAN_STATE, CURRENT_LED_STATE, PRINT_START_TIMESTAMP, ACTIVE_TOKEN, ACTIVE_JWT_TOKEN, ACTIVE_LIVESTREAM
+    global CURRENT_FAN_STATE, CURRENT_LED_STATE, ACTIVE_LIVESTREAM, ACTIVE_JWT_TOKEN
     try:
+        payload = json.loads(msg.payload.decode("utf-8"))
         topic = msg.topic
-        raw_payload = msg.payload.decode("utf-8", errors="ignore")
-        is_object_spam = '"printObjects"' in raw_payload
+        log(f"[<<< MQTT INCOMING <<<] Topic: {topic} | Payload: {json.dumps(payload)}")
 
-        if not is_object_spam:
-            log(f"\n[<<< MQTT INCOMING <<<] Topic: {topic} | Payload: {raw_payload}")
-
-        payload = json.loads(raw_payload)
-
-        if "rpc/request/" in topic:
+        if "v1/devices/me/rpc/request/" in topic:
             req_id = topic.split("/")[-1]
+            method = payload.get("method")
             params = payload.get("params", {})
-            rpc_reply = {"code": 0}
+            rpc_reply = {}
 
-            if "token" in params or "jwtToken" in params:
-                t_val = params.get("token", params.get("jwtToken"))
-                ACTIVE_TOKEN = t_val
-                ACTIVE_JWT_TOKEN = t_val
-                ACTIVE_LIVESTREAM = params.get("livestream", 1)
-
-                client.publish(f"v1/devices/me/rpc/response/{req_id}", json.dumps({}))
-                client.publish("v1/devices/me/attributes", json.dumps({
-                    "video": 1 if VIDEO_ENABLED else 0,
-                    "livestream": ACTIVE_LIVESTREAM,
-                    "jwtToken": ACTIVE_JWT_TOKEN,
-                    "token": ACTIVE_TOKEN
-                }))
-                threading.Thread(target=forward_video_token, args=(t_val, ACTIVE_LIVESTREAM), daemon=True).start()
-
-            for key, val in params.items():
-                if not is_object_spam and key not in ("token", "jwtToken", "livestream"):
+            if method in ["set", "get"]:
+                for key, val in params.items():
                     log(f"[EXECUTE] {key} -> {repr(val)}")
 
-                if key == "pFileList":
-                    rpc_reply["pFileList"] = get_web_file_array(val, 0)
-                elif key == "uFileList":
-                    rpc_reply["uFileList"] = get_web_file_array(val, 1)
-                elif key == "reqGcodeFile":
-                    v = int(val)
-                    f_info = get_paged_files(v & 0xFFFF, v >> 16)
-                    client.publish("v1/devices/me/attributes", json.dumps({"retGcodeFileInfo": f_info}))
-                    rpc_reply.update({"retGcodeFileInfo": f_info})
-                elif key == "opGcodeFile":
-                    val_str = str(val)
-                    if "print" in val_str:
-                        cloud_fname = val_str.split(":/local/")[-1].split(":/usb/")[-1].strip()
-                        PRINT_START_TIMESTAMP = int(time.time())
-                        moonraker_post("/printer/print/start", {"filename": resolve_filename(cloud_fname)})
-                        client.publish("v1/devices/me/attributes", json.dumps({
-                            "state": 1, "mcu_is_print": 1, "filename": cloud_fname, "print": cloud_fname,
-                            "opGcodeFile": val_str, "printStartTime": str(PRINT_START_TIMESTAMP)
-                        }))
-                    elif "delete" in val_str:
-                        requests.delete(f"{MOONRAKER}/server/files/gcodes/{resolve_filename(val_str.split(':/local/')[-1].strip())}", timeout=5)
-                    elif "rename" in val_str:
-                        parts = val_str.split(":")
-                        if len(parts) >= 4:
-                            moonraker_post("/server/files/move", {"source": f"gcodes/{resolve_filename(parts[2].lstrip('/'))}", "dest": f"gcodes/{parts[3].lstrip('/')}"})
-                    client.publish("v1/devices/me/attributes", json.dumps({"opGcodeFile": val_str}))
+                    if key == "pFileList":
+                        f_arr = get_web_file_array(val, 0)
+                        rpc_reply["pFileList"] = f_arr
+                        rpc_reply["result"] = f_arr
+                    elif key == "uFileList":
+                        f_arr = get_web_file_array(val, 1)
+                        rpc_reply["uFileList"] = f_arr
+                        rpc_reply["result"] = f_arr
+                    elif key == "reqGcodeFile":
+                        try:
+                            v = int(val)
+                            f_info = get_paged_files(v & 0xFFFF, v >> 16)
+                        except:
+                            f_info = {"tf": 0, "fileinfo": "", "pageindex": 0}
+                        client.publish("v1/devices/me/attributes", json.dumps({"retGcodeFileInfo": f_info}))
+                        rpc_reply.update({"retGcodeFileInfo": f_info, "result": f_info})
 
-                elif key == "printId":
-                    CURRENT_PRINT_ID = val
-                elif key == "stop":
-                    cancel_print_job(client)
-                elif key == "pause":
-                    pause_print_job(client, int(val) == 1)
-                elif key == "print":
-                    threading.Thread(target=download_and_print, args=(val, client, params), daemon=True).start()
+                    elif key == "opGcodeFile":
+                        val_str = str(val)
+                        if "print" in val_str and "local" in val_str:
+                            fname = val_str.split("/local/")[-1]
+                            moonraker_post("/printer/print/start", {"filename": fname})
+                        client.publish("v1/devices/me/attributes", json.dumps({"opGcodeFile": val_str}))
+                        rpc_reply.update({"opGcodeFile": val_str})
 
-                elif key == "curFeedratePct":
-                    send_gcode(f"M220 S{val}")
-                elif key == "curFlowratePct":
-                    send_gcode(f"M221 S{val}")
-                elif key == "enableSelfTest":
-                    send_gcode("G28")
-                elif key == "feed":
-                    target_temp = params.get("feedStateTemp2", 200)
-                    send_gcode(f"M109 S{target_temp}\nG91\nG1 E50 F300\nG90")
-                elif key == "return":
-                    target_temp = params.get("feedStateTemp2", 200)
-                    send_gcode(f"M109 S{target_temp}\nG91\nG1 E-10 F300\nG90")
-                elif key == "led":
-                    CURRENT_LED_STATE = int(val)
-                    send_gcode(f"SET_PIN PIN=caselight VALUE={1.0 if CURRENT_LED_STATE else 0.0}")
-                    client.publish("v1/devices/me/attributes", json.dumps({"led_state": CURRENT_LED_STATE}))
-                elif key == "fan":
-                    CURRENT_FAN_STATE = int(val)
-                    send_gcode(f"M106 S{int((CURRENT_FAN_STATE / 100.0) * 255) if CURRENT_FAN_STATE > 1 else (255 if CURRENT_FAN_STATE == 1 else 0)}")
-                    client.publish("v1/devices/me/attributes", json.dumps({"fan": CURRENT_FAN_STATE}))
-                elif key == "nozzleTemp2":
-                    send_gcode(f"M104 S{val}")
-                elif key == "bedTemp2":
-                    send_gcode(f"M140 S{val}")
+                    elif key == "pause":
+                        if int(val) == 1: moonraker_post("/printer/print/pause")
+                        else: moonraker_post("/printer/print/resume")
+                        client.publish("v1/devices/me/attributes", json.dumps({"pause": int(val)}))
+                    elif key == "stop":
+                        if int(val) == 1: moonraker_post("/printer/print/cancel")
+                        client.publish("v1/devices/me/attributes", json.dumps({"stop": 1, "state": 4}))
 
-                elif key == "gcodeCmd":
-                    cmd = str(val).strip().upper()
-                    attr_update = {"gcodeCmd": cmd}
-                    if "G28" in cmd:
-                        send_gcode("G28\nG90")
-                        attr_update["curPosition"] = get_klipper_pos()
-                    elif "M290" in cmd:
-                        m = re.search(r"Z([+-]?\d*\.?\d+)", cmd)
-                        if m:
-                            send_gcode(f"SET_GCODE_OFFSET Z_ADJUST={float(m.group(1))} MOVE=1")
-                    elif "M221" in cmd:
-                        m = re.search(r"S(\d+)", cmd)
-                        if m:
-                            send_gcode(f"M221 S{m.group(1)}")
-                    elif "G0" in cmd or "G1" in cmd:
-                        send_gcode(f"G90\n{cmd}")
-                        pos_idx = cmd.find("G0")
-                        if pos_idx >= 0:
-                            attr_update["setPosition"] = cmd[pos_idx + 2:].strip()
-                        attr_update["curPosition"] = get_klipper_pos()
-                    else:
-                        send_gcode(cmd)
-                    client.publish("v1/devices/me/attributes", json.dumps(attr_update))
+                    elif key in ["nozzleTemp", "nozzleTemp2"]:
+                        send_gcode(f"M104 S{val}")
+                    elif key in ["bedTemp", "bedTemp2"]:
+                        send_gcode(f"M140 S{val}")
 
-                elif key == "autohome":
-                    send_gcode("G28\nG90")
-                    client.publish("v1/devices/me/attributes", json.dumps({"curPosition": get_klipper_pos(), "autohome": 1}))
-                elif key == "ReqPrinterPara":
-                    client.publish("v1/devices/me/attributes", json.dumps({"curPosition": get_klipper_pos(), "autohome": 1}))
-                    rpc_reply.update({"curPosition": get_klipper_pos(), "autohome": 1})
+                    elif key == "fan":
+                        CURRENT_FAN_STATE = int(val)
+                        speed = int((CURRENT_FAN_STATE / 100.0) * 255) if CURRENT_FAN_STATE > 1 else (255 if CURRENT_FAN_STATE == 1 else 0)
+                        send_gcode(f"M106 S{speed}")
+                        client.publish("v1/devices/me/attributes", json.dumps({"fan": CURRENT_FAN_STATE}))
+                    elif key == "led":
+                        CURRENT_LED_STATE = int(val)
+                        client.publish("v1/devices/me/attributes", json.dumps({"led_state": CURRENT_LED_STATE, "led": CURRENT_LED_STATE}))
+
+                    elif key == "autohome":
+                        val_str = str(val).lower()
+                        if val_str == "z":
+                            send_gcode("G28 Z\nG90")
+                        elif val_str in ["xy", "x", "y", "1", "true"]:
+                            send_gcode("G28 X Y\nG90")
+                        else:
+                            send_gcode("G28\nG90")
+                        pos = get_klipper_pos()
+                        client.publish("v1/devices/me/attributes", json.dumps({"curPosition": pos, "autohome": 1}))
+                        rpc_reply.update({"curPosition": pos, "autohome": 1})
+
+                    elif key == "gcodeCmd":
+                        send_gcode(val)
+
+                    elif key == "token":
+                        ACTIVE_JWT_TOKEN = val
+                        try:
+                            with open("/root/CrealityBridge/video-relay/token_cache.json", "w") as cf:
+                                json.dump({"token": val}, cf)
+                            subprocess.Popen(["sudo", "systemctl", "restart", "creality_video.service"])
+                        except Exception as ce:
+                            pass
+
+                    elif key == "livestream":
+                        ACTIVE_LIVESTREAM = int(val)
+                        client.publish("v1/devices/me/attributes", json.dumps({"livestream": ACTIVE_LIVESTREAM}))
 
             if "token" not in params and "jwtToken" not in params:
                 client.publish(f"v1/devices/me/rpc/response/{req_id}", json.dumps(rpc_reply))
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"[-] RPC Error: {e}")
 
 def main():
-    global LAST_STATE, COMPLETION_BROADCAST_TIME, CURRENT_PRINT_ID, DOWNLOAD_PROGRESS, IS_DOWNLOADING, PRINT_START_TIMESTAMP
+    global CURRENT_PRINT_ID
+    import_cloud_device()
     log(f"[*] Initializing Creality Klipper Bridge ({PRINTER_NAME} as {PRINTER_MODEL})...")
+
     try:
         client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
     except AttributeError:
@@ -413,122 +256,79 @@ def main():
         log(f"[-] MQTT Connection Failed: {e}")
         return
 
-    send_gcode("G90")
-    get_clean_moonraker_files()
-    local_ip = get_local_ip()
-
-    client.publish("v1/devices/me/attributes", json.dumps({
-        "connect": 1, "tfCard": 1, "boxVersion": "rasp_v2.01b99", "tag": "1.0.8",
-        "netIP": local_ip, "model": PRINTER_MODEL, "machineType": PRINTER_MODEL,
-        "deviceName": PRINTER_NAME, "state": 0, "err": 0, "stop": 0, "pause": 0,
-        "mcu_is_print": 0, "video": 1 if VIDEO_ENABLED else 0,
-        "led_state": CURRENT_LED_STATE, "fan": CURRENT_FAN_STATE,
-        "curPosition": get_klipper_pos(), "print": "", "filename": "", "printId": "",
-        "boxTemp": int(get_host_temp())
-    }))
-
-    heartbeat_counter = 0
+    attr_init = {
+        "printStartTime": " ", "layer": 0, "printedTimes": 0, "timesLeftToPrint": 0,
+        "err": 0, "curPosition": get_klipper_pos(), "printId": "", "filename": "", "video": 1,
+        "netIP": get_local_ip(), "state": 0, "tfCard": 1, "model": PRINTER_MODEL, "machineType": PRINTER_MODEL, "deviceName": PRINTER_NAME,
+        "mcu_is_print": 0, "boxVersion": "rasp_v2.11b03", "InitString": " ", "APILicense": " ",
+        "DIDString": " ", "retGcodeFileInfo": get_paged_files(0, 0), "autohome": 0, "fan": CURRENT_FAN_STATE,
+        "stop": 0, "print": "", "nozzleTemp2": 0.0, "bedTemp2": 0.0, "pause": 0,
+        "opGcodeFile": "", "gcodeCmd": "", "setPosition": "", "livestream": ACTIVE_LIVESTREAM,
+        "token": ACTIVE_JWT_TOKEN, "pullclient": "", "tag": "1.1.3", "led_state": CURRENT_LED_STATE
+    }
+    client.publish("v1/devices/me/attributes", json.dumps(attr_init))
 
     while True:
         try:
-            res = requests.get(f"{MOONRAKER}/printer/objects/query?print_stats&display_status&toolhead&heater_bed&extruder&virtual_sdcard&gcode_move&fan&webhooks", timeout=2)
+            res = requests.get(f"{MOONRAKER}/printer/objects/query?print_stats&display_status&toolhead&heater_bed&extruder", timeout=2)
             if res.status_code == 200:
-                data = res.json().get("result", {}).get("status", {})
-                print_stats = data.get("print_stats", {})
-                display_status = data.get("display_status", {})
+                data = res.json()["result"]["status"]
+
+                p_stats = data.get("print_stats", {})
+                d_stats = data.get("display_status", {})
                 extruder = data.get("extruder", {})
                 heater_bed = data.get("heater_bed", {})
-                vsd = data.get("virtual_sdcard", {})
-                gcode_move = data.get("gcode_move", {})
-                klipper_fan = data.get("fan", {})
-                webhooks = data.get("webhooks", {})
+                toolhead = data.get("toolhead", {})
 
-                klipper_ready = webhooks.get("state", "ready") == "ready"
-                state_str = print_stats.get("state", "standby")
-                err_code = 0
+                klipper_state = p_stats.get("state", "")
+                safe_file = p_stats.get("filename", "")
+                is_active_print = (klipper_state == "printing")
 
-                if state_str == "printing":
-                    state_code = 1
-                    COMPLETION_BROADCAST_TIME = 0
-                    if PRINT_START_TIMESTAMP == 0:
-                        PRINT_START_TIMESTAMP = int(time.time() - print_stats.get("print_time", 0))
-                elif state_str == "paused":
-                    state_code = 5
-                    COMPLETION_BROADCAST_TIME = 0
-                elif state_str == "complete":
-                    if COMPLETION_BROADCAST_TIME == 0:
-                        COMPLETION_BROADCAST_TIME = time.time()
-                    if time.time() - COMPLETION_BROADCAST_TIME < 20:
-                        state_code = 2
-                    else:
-                        state_code = 0
-                        CURRENT_PRINT_ID = ""
-                        PRINT_START_TIMESTAMP = 0
-                elif state_str in ("cancelled", "error") or not klipper_ready:
-                    state_code = 4 if state_str == "cancelled" else 3
-                    err_code = 1 if state_str == "error" else 0
+                state_code = 0
+                if klipper_state == "printing": state_code = 1
+                elif klipper_state == "complete": state_code = 2
+                elif klipper_state == "error": state_code = 3
+                elif klipper_state == "cancelled": state_code = 4
+                elif klipper_state == "paused": state_code = 5
+
+                if is_active_print and not CURRENT_PRINT_ID:
+                    CURRENT_PRINT_ID = f"local_{int(time.time())}"
+                elif not is_active_print and state_code != 2:
                     CURRENT_PRINT_ID = ""
-                    PRINT_START_TIMESTAMP = 0
-                else:
-                    state_code = 0
-                    COMPLETION_BROADCAST_TIME = 0
-                    PRINT_START_TIMESTAMP = 0
 
-                if state_str != LAST_STATE:
-                    LAST_STATE = state_str
-                is_active_print = state_str in ("printing", "paused")
-                job_time = int(print_stats.get("print_time", 0)) if is_active_print else 0
-                file_size = vsd.get("file_size", 0)
-                left_time = int((job_time / (vsd.get("file_position", 0) / file_size)) - job_time) if is_active_print and vsd.get("file_position", 0) > 0 and file_size > 0 and job_time > 0 else 0
+                noz_temp = float(extruder.get("temperature", 0.0) or 0.0)
+                bed_temp = float(heater_bed.get("temperature", 0.0) or 0.0)
+
+                z_pos = 0.0
+                if "position" in toolhead and len(toolhead["position"]) >= 3:
+                    z_pos = float(toolhead["position"][2])
 
                 client.publish("v1/devices/me/telemetry", json.dumps({
-                    "dProgress": DOWNLOAD_PROGRESS if IS_DOWNLOADING else 100,
-                    "printProgress": int(display_status.get("progress", 0) * 100) if is_active_print else 0,
-                    "nozzleTemp": float(extruder.get("temperature", 0.0)),
-                    "bedTemp": float(heater_bed.get("temperature", 0.0)),
-                    "boxTemp": int(get_host_temp()),
-                    "printJobTime": job_time, "printLeftTime": left_time,
-                    "curFeedratePct": int(gcode_move.get("speed_factor", 1.0) * 100),
-                    "curFlowratePct": int(gcode_move.get("extrude_factor", 1.0) * 100)
+                    "printProgress": int(d_stats.get("progress", 0) * 100) if is_active_print else 0,
+                    "nozzleTemp": noz_temp if noz_temp > 10.0 else 25.0,
+                    "bedTemp": bed_temp if bed_temp > 10.0 else 25.0,
+                    "printJobTime": int(p_stats.get("print_duration", 0)),
+                    "printLeftTime": 0
                 }))
 
-                safe_file = sanitize_filename(print_stats.get("filename", "")) if is_active_print else ""
-                fan_val = 1 if klipper_fan.get("speed", 0.0) > 0 else 0
-                cur_layer = print_stats.get("info", {}).get("current_layer", 0) if is_active_print else 0
-                tot_layer = print_stats.get("info", {}).get("total_layer", 0) if is_active_print else 0
-
                 attr_payload = {
-                    "connect": 1 if klipper_ready else 0, "state": state_code, "err": err_code,
-                    "mcu_is_print": 1 if is_active_print else 0, "filename": safe_file, "print": safe_file,
-                    "printId": CURRENT_PRINT_ID if (is_active_print or state_code == 2) else "",
-                    "nozzleTemp2": float(extruder.get("target", 0.0)), "bedTemp2": float(heater_bed.get("target", 0.0)),
-                    "boxTemp": int(get_host_temp()),
-                    "layer": cur_layer, "curLayer": cur_layer,
-                    "totalLayer": tot_layer, "total_layer": tot_layer,
-                    "curPosition": get_klipper_pos(), "fan": fan_val, "led_state": CURRENT_LED_STATE,
+                    "connect": 1, "state": state_code,
+                    "mcu_is_print": 1 if is_active_print else 0,
+                    "filename": safe_file, "print": safe_file,
+                    "printId": CURRENT_PRINT_ID,
+                    "nozzleTemp2": float(extruder.get("target", 0.0)),
+                    "bedTemp2": float(heater_bed.get("target", 0.0)),
+                    "curPosition": get_klipper_pos(),
                     "model": PRINTER_MODEL, "machineType": PRINTER_MODEL, "deviceName": PRINTER_NAME,
-                    "tfCard": 1, "boxVersion": "rasp_v2.01b99", "tag": "1.0.8", "netIP": local_ip,
-                    "video": 1 if VIDEO_ENABLED else 0
+                    "led_state": CURRENT_LED_STATE,
+                    "video": 1
                 }
-
-                if ACTIVE_TOKEN:
-                    attr_payload["token"] = ACTIVE_TOKEN
-                    attr_payload["jwtToken"] = ACTIVE_JWT_TOKEN
-                    attr_payload["livestream"] = ACTIVE_LIVESTREAM
-
-                if PRINT_START_TIMESTAMP > 0:
-                    attr_payload["printStartTime"] = str(PRINT_START_TIMESTAMP)
-
                 client.publish("v1/devices/me/attributes", json.dumps(attr_payload))
 
-                heartbeat_counter += 1
-                if heartbeat_counter >= 5:
-                    log(f"[HEARTBEAT] State={state_code} | Z={get_klipper_pos().split('Z:')[-1]} | Temp={extruder.get('temperature', 0.0):.1f}/{extruder.get('target', 0.0):.1f}C")
-                    heartbeat_counter = 0
-
-        except Exception:
+        except Exception as e:
             pass
-        time.sleep(1)
+
+        time.sleep(2)
 
 if __name__ == "__main__":
     main()
