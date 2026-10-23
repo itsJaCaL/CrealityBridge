@@ -24,7 +24,7 @@ Connect **any** Klipper/Moonraker 3D printer (Raspberry Pi, BTT CB1/Manta, Sonic
 SSH into your Klipper host machine and run the following commands:
 
 ```bash
-git clone [https://github.com/itsJaCaL/CrealityBridge.git](https://github.com/itsJaCaL/CrealityBridge.git)
+git clone https://github.com/itsJaCaL/CrealityBridge.git
 cd CrealityBridge
 chmod +x install.sh
 sudo bash install.sh
