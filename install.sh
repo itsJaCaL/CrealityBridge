@@ -12,26 +12,36 @@ USER_HOME=$(eval echo "~$CURRENT_USER")
 INSTALL_DIR="$USER_HOME/CrealityBridge"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "============================================================"
-echo "   Creality Cloud Universal Klipper Bridge & Video Relay    "
-echo "============================================================"
+# Color Definitions for a Sexy UI
+C_CYAN="\033[1;36m"
+C_GREEN="\033[1;32m"
+C_YELLOW="\033[1;33m"
+C_RED="\033[1;31m"
+C_RESET="\033[0m"
+
+print_banner() {
+    clear
+    echo -e "${C_CYAN}============================================================${C_RESET}"
+    echo -e "${C_CYAN}   🚀 Creality Cloud Universal Klipper Bridge & Video Relay ${C_RESET}"
+    echo -e "${C_CYAN}============================================================${C_RESET}"
+}
+
+print_banner
 
 if [[ "$1" == "--uninstall" ]]; then
-    echo "[*] Uninstalling services and removing files..."
+    echo -e "${C_YELLOW}[*] Uninstalling services and removing files...${C_RESET}"
     sudo systemctl stop creality_bridge.service 2>/dev/null || true
     sudo systemctl disable creality_bridge.service 2>/dev/null || true
     sudo rm -f /etc/systemd/system/creality_bridge.service
     sudo systemctl stop creality_video.service 2>/dev/null || true
     sudo systemctl disable creality_video.service 2>/dev/null || true
-    sudo rm -f /etc/systemd/system/creality_video.service
     sudo systemctl daemon-reload
     rm -rf "$INSTALL_DIR"
-    echo "[+] Uninstalled cleanly!"
+    echo -e "${C_GREEN}[+] Uninstalled cleanly!${C_RESET}"
     exit 0
 fi
 
-echo ""
-echo "Select Installation Mode:"
+echo -e "\n${C_CYAN}Select Installation Mode:${C_RESET}"
 echo "  [1] Telemetry & Control Bridge Only (Sonic Pad / Nebula Pad / No Cam)"
 echo "  [2] All-in-One: Bridge + Local WebRTC Video Relay (Pi 5 / Pi 3B+ / CB1)"
 echo "  [3] Remote Video Relay Node Only (TrueNAS VM / Proxmox / Home Server)"
@@ -62,29 +72,25 @@ fetch_file() {
 # STEP A: Configure Telemetry & Control Bridge
 # ==============================================================================
 if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
-    echo ""
-    echo "============================================================"
-    echo "               CREALITY CLOUD AUTHENTICATION                "
-    echo "============================================================"
-    echo "To connect your printer:"
-    echo "  1. Go to Creality Cloud -> Devices -> Add Device (Raspberry Pi/Klipper)."
-    echo "  2. Download the key files."
-    echo "  3. Open the downloaded .tk file with a text editor and copy the text inside."
-    echo "============================================================"
-    echo ""
+    echo -e "\n${C_CYAN}============================================================${C_RESET}"
+    echo -e "${C_CYAN}               CREALITY CLOUD AUTHENTICATION                ${C_RESET}"
+    echo -e "${C_CYAN}============================================================${C_RESET}"
+    echo "To connect your printer to Creality Cloud:"
+    echo "  1. Go to Creality Cloud -> Devices -> Add Device (Pi/Klipper)."
+    echo "  2. Download your printer key files."
+    echo "  3. Open the downloaded .tk file with a text editor & copy text."
+    echo -e "${C_CYAN}============================================================${C_RESET}\n"
 
     while [[ -z "$JWT_TOKEN" ]]; do
         read -p "Paste the contents of your .tk file (Token): " JWT_TOKEN
     done
 
-    # Generate an initial random unique device identifier for dynamic registration
     RANDOM_KEY="CC_$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)"
 
     read -p "Enter a display name for your printer [default: Klipper-Printer]: " PRINTER_NAME
     PRINTER_NAME="${PRINTER_NAME:-Klipper-Printer}"
 
-    echo ""
-    echo "Select Printer Model Profile:"
+    echo -e "\n${C_CYAN}Select Printer Model Profile:${C_RESET}"
     echo "  [1] K2 Plus       (Unlocks ALL flagship controls: Flow, Speed, Extrude/Retract, Fans, CFS)"
     echo "  [2] K1 Max        (Unlocks full high-speed Klipper controls: Flow, Speed, Extrude/Retract)"
     echo "  [3] Ender-3 V3 KE (Standard Klipper bed-slinger profile)"
@@ -118,10 +124,10 @@ if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
         fi
     fi
 
-    echo "[*] Checking Python dependencies for Bridge..."
+    echo -e "${C_YELLOW}[*] Checking Python dependencies for Bridge...${C_RESET}"
     python3 -c "import paho.mqtt.client, requests" 2>/dev/null || {
-        echo "[*] Installing paho-mqtt and requests..."
-        pip3 install paho-mqtt requests --break-system-packages 2>/dev/null || pip3 install paho-mqtt requests
+        echo -e "${C_YELLOW}[*] Installing paho-mqtt and requests...${C_RESET}"
+        pip3 install paho-mqtt requests --break-system-packages &>/dev/null || pip3 install paho-mqtt requests &>/dev/null
     }
 
     fetch_file "bridge/creality_master_bridge.py" "$INSTALL_DIR/bridge/creality_master_bridge.py"
@@ -139,7 +145,7 @@ if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
 }
 EOF
 
-    echo "[*] Registering creality_bridge.service..."
+    echo -e "${C_YELLOW}[*] Registering creality_bridge.service...${C_RESET}"
     sudo tee /etc/systemd/system/creality_bridge.service > /dev/null << EOF
 [Unit]
 Description=Creality Cloud Telemetry & Control Bridge
@@ -161,15 +167,14 @@ EOF
     sudo systemctl daemon-reload
     sudo systemctl enable creality_bridge.service
     sudo systemctl restart creality_bridge.service
-    echo "[+] Creality Master Bridge installed and started!"
+    echo -e "${C_GREEN}[+] Creality Master Bridge installed and started!${C_RESET}"
 fi
 
 # ==============================================================================
 # STEP B: Configure WebRTC Video Relay
 # ==============================================================================
 if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
-    echo ""
-    echo "--- WebRTC Video Relay Configuration ---"
+    echo -e "\n${C_CYAN}--- WebRTC Video Relay Configuration ---${C_RESET}"
 
     DEFAULT_CAM_URL="http://127.0.0.1/webcam/?action=stream"
     if [[ "$INSTALL_MODE" == "3" ]]; then
@@ -185,8 +190,7 @@ if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
     read -p "Enter Camera Stream URL [default: $DEFAULT_CAM_URL]: " CAM_URL
     CAM_URL="${CAM_URL:-$DEFAULT_CAM_URL}"
 
-    echo ""
-    echo "Select Camera Rotation:"
+    echo -e "\n${C_CYAN}Select Camera Rotation:${C_RESET}"
     echo "  [1] 0 degrees   (No rotation)"
     echo "  [2] 90 degrees  (Counter-Clockwise)"
     echo "  [3] 180 degrees (Upside-down flip)"
@@ -203,29 +207,31 @@ if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
     TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     TOTAL_SWAP_KB=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
     if [[ "$TOTAL_MEM_KB" -lt 2500000 && "$TOTAL_SWAP_KB" -lt 1000000 ]]; then
-        echo "[*] Low RAM detected with minimal swap. Creating 2GB safety swapfile..."
+        echo -e "${C_YELLOW}[*] Low RAM detected. Creating 2GB safety swapfile...${C_RESET}"
         if [[ ! -f /swapfile ]]; then
-            sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+            sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 &>/dev/null
             sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
+            sudo mkswap /swapfile &>/dev/null
             sudo swapon /swapfile
             echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab > /dev/null
         fi
     fi
 
-    echo "[*] Installing system packages for WebRTC & OpenCV..."
-    sudo apt-get update
-    sudo apt-get install -y python3-venv python3-pip python3-dev ffmpeg \
+    echo -e "${C_YELLOW}[*] Installing system packages (FFmpeg & Dev Tools)...${C_RESET}"
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq python3-venv python3-pip python3-dev ffmpeg \
         libavdevice-dev libavfilter-dev libopus-dev libvpx-dev pkg-config \
         libsrtp2-dev libssl-dev libffi-dev curl
 
-    echo "[*] Building Python virtual environment (venv_video)..."
+    echo -e "${C_YELLOW}[*] Building Python virtual environment (venv_video)...${C_RESET}"
     python3 -m venv "$INSTALL_DIR/video-relay/venv_video"
     source "$INSTALL_DIR/video-relay/venv_video/bin/activate"
-    pip install --upgrade pip
-    pip install aiortc aiohttp websockets websocket-client requests paho-mqtt "numpy<2" opencv-python-headless
+    
+    echo -e "${C_YELLOW}[*] Installing WebRTC & OpenCV Python packages (this may take a minute)...${C_RESET}"
+    pip install --upgrade pip &>/dev/null
+    pip install aiortc aiohttp websockets websocket-client requests paho-mqtt "numpy<2" opencv-python-headless &>/dev/null
 
-    echo "[*] Downloading official signaling channel and relay scripts..."
+    echo -e "${C_YELLOW}[*] Downloading official signaling scripts...${C_RESET}"
     curl -sSL "https://raw.githubusercontent.com/crealitycloud/OctoPrint-CrealityCloud-With-Video/master/octoprint_crealitycloud/signaling_channel.py" \
         -o "$INSTALL_DIR/video-relay/signaling_channel.py"
 
@@ -239,7 +245,7 @@ if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
 }
 EOF
 
-    echo "[*] Registering creality_video.service..."
+    echo -e "${C_YELLOW}[*] Registering creality_video.service...${C_RESET}"
     sudo tee /etc/systemd/system/creality_video.service > /dev/null << EOF
 [Unit]
 Description=Creality Cloud WebRTC Video Relay
@@ -261,13 +267,12 @@ EOF
     sudo systemctl daemon-reload
     sudo systemctl enable creality_video.service
     sudo systemctl restart creality_video.service
-    echo "[+] Creality WebRTC Video Relay installed and started!"
+    echo -e "${C_GREEN}[+] Creality WebRTC Video Relay installed and started!${C_RESET}"
 fi
 
-echo ""
-echo "============================================================"
-echo " [+] INSTALLATION COMPLETE!"
-echo "     Bridge Status : sudo systemctl status creality_bridge.service"
-echo "     Video Status  : sudo systemctl status creality_video.service"
-echo "     Uninstall     : bash install.sh --uninstall"
-echo "============================================================"
+echo -e "\n${C_CYAN}============================================================${C_RESET}"
+echo -e "${C_GREEN} [+] INSTALLATION COMPLETE!${C_RESET}"
+echo -e "     ${C_CYAN}Bridge Status :${C_RESET} sudo systemctl status creality_bridge.service"
+echo -e "     ${C_CYAN}Video Status  :${C_RESET} sudo systemctl status creality_video.service"
+echo -e "     ${C_CYAN}Uninstall     :${C_RESET} bash install.sh --uninstall"
+echo -e "${C_CYAN}============================================================${C_RESET}"
