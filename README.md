@@ -21,7 +21,7 @@ Open the downloaded .tk file using a standard text editor (Notepad, TextEdit, Na
 
 ⚡ Quick Start Installation
 SSH into your Klipper host machine and run the following commands:
-
+```bash
 git clone https://github.com/itsJaCaL/CrealityBridge.git
 cd CrealityBridge
 chmod +x install.sh
