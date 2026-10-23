@@ -5,9 +5,10 @@ import asyncio
 import os
 import time
 import numpy as np
+import cv2
+import aiohttp
 from av import VideoFrame
 from aiortc import RTCIceCandidate, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCPeerConnection, VideoStreamTrack
-from aiortc.contrib.media import MediaPlayer
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "video_config.json")
 
@@ -18,38 +19,77 @@ def load_video_config():
     except Exception:
         return {"camera_url": "http://127.0.0.1/webcam/?action=stream", "rotation": 0}
 
-class VideoTransformTrack(VideoStreamTrack):
-    def __init__(self, track, rotation_deg=0):
+class RawMjpegTrack(VideoStreamTrack):
+    def __init__(self, camera_url, rotation_deg=0):
         super().__init__()
-        self.track = track
+        self.camera_url = camera_url
         self.k_rot = (int(rotation_deg) // 90) % 4
-        self.last_recv = time.time()
+        self._session = None
+        self._closed = False
+        self._latest_img = None
+        self._new_frame_event = asyncio.Event()
+        
+        self._scrape_task = asyncio.create_task(self._scrape_loop())
+
+    async def _scrape_loop(self):
+        while not self._closed:
+            try:
+                if self._session is None:
+                    self._session = aiohttp.ClientSession()
+                
+                timeout = aiohttp.ClientTimeout(total=None, sock_read=5.0)
+                async with self._session.get(self.camera_url, timeout=timeout) as response:
+                    multipart = aiohttp.MultipartReader.from_response(response)
+                    
+                    while not self._closed:
+                        part = await multipart.next()
+                        if part is None:
+                            break
+                        
+                        jpg_data = await part.read()
+                        if not jpg_data.startswith(b'\xff\xd8'):
+                            continue
+                            
+                        frame_array = np.frombuffer(jpg_data, dtype=np.uint8)
+                        img = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+                        
+                        if img is not None:
+                            if self.k_rot != 0:
+                                img = np.rot90(img, k=self.k_rot, axes=(0, 1))
+                                img = np.ascontiguousarray(img)
+                                
+                            self._latest_img = img
+                            self._new_frame_event.set()
+
+            except Exception as e:
+                logging.error(f"Stream read error: {e}")
+                
+            if not self._closed:
+                await asyncio.sleep(1)
 
     async def recv(self):
-        self.last_recv = time.time()
-        frame = await self.track.recv()
+        if self._closed:
+            raise Exception("Track is closed")
 
-        # Drain stale buffered frames so RAM stays flat and latency stays minimal
-        if hasattr(self.track, "_queue"):
-            while self.track._queue.qsize() > 1:
-                frame = await self.track.recv()
+        await self._new_frame_event.wait()
+        self._new_frame_event.clear()
 
-        if self.k_rot == 0:
-            return frame
-
-        img = frame.to_ndarray(format="bgr24")
-        img = np.rot90(img, k=self.k_rot, axes=(0, 1))
-        img = np.ascontiguousarray(img)
-
+        img = self._latest_img
         new_frame = VideoFrame.from_ndarray(img, format="bgr24")
-        new_frame.pts = frame.pts
-        new_frame.time_base = frame.time_base
+        
+        pts, time_base = await self.next_timestamp()
+        new_frame.pts = pts
+        new_frame.time_base = time_base
+        
         return new_frame
 
     def stop(self):
         super().stop()
-        if self.track:
-            self.track.stop()
+        self._closed = True
+        if self._scrape_task:
+            self._scrape_task.cancel()
+        if self._session:
+            asyncio.create_task(self._session.close())
 
 class WebrtcManager:
     def __init__(self, deviceName, our_peer_id, options, close_queue, token, region, recorder, verbose=False):
@@ -113,26 +153,17 @@ class WebrtcManager:
         config = RTCConfiguration([RTCIceServer(s["urls"], s["username"], s["credential"]) for s in iceServers])
         pc = RTCPeerConnection(config)
 
-        player_options = {
-            "fflags": "nobuffer",
-            "flags": "low_delay",
-            "strict": "experimental"
-        }
-
-        webcam = MediaPlayer(cam_url, format="mjpeg", options=player_options)
-        video_track = VideoTransformTrack(webcam.video, rot_deg) if webcam.video else None
+        video_track = RawMjpegTrack(cam_url, rot_deg)
 
         self.peers[peer_id] = {
             "peerId": peer_id,
             "polite": polite,
             "rtcPeerConnection": pc,
-            "mediaplayer": webcam,
             "localVideoStream": video_track
         }
 
-        if video_track:
-            pc.addTransceiver("video", direction="sendonly")
-            pc.addTrack(video_track)
+        pc.addTransceiver("video", direction="sendonly")
+        pc.addTrack(video_track)
 
         @pc.on("iceconnectionstatechange")
         def on_iceconnectionstatechange():
@@ -206,11 +237,6 @@ class WebrtcManager:
             if peer.get("localVideoStream"):
                 try:
                     peer["localVideoStream"].stop()
-                except Exception:
-                    pass
-            if peer.get("mediaplayer") and peer["mediaplayer"].video:
-                try:
-                    peer["mediaplayer"].video.stop()
                 except Exception:
                     pass
             if peer.get("rtcPeerConnection"):
