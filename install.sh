@@ -6,7 +6,7 @@ set -e
 # ==============================================================================
 
 # Replace this URL with your own GitHub raw URL once you upload the repo!
-REPO_RAW_URL="https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/CrealityBridge/main"
+REPO_RAW_URL="https://raw.githubusercontent.com/itsJaCaL/CrealityBridge/main"
 
 CURRENT_USER="${USER:-$(whoami)}"
 USER_HOME=$(eval echo "~$CURRENT_USER")
