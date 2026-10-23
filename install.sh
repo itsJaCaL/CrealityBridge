@@ -5,7 +5,6 @@ set -e
 # Creality Cloud Universal Klipper Bridge & WebRTC Video Relay Installer
 # ==============================================================================
 
-# Replace this URL with your own GitHub raw URL once you upload the repo!
 REPO_RAW_URL="https://raw.githubusercontent.com/itsJaCaL/CrealityBridge/main"
 
 CURRENT_USER="${USER:-$(whoami)}"
@@ -60,7 +59,7 @@ fetch_file() {
 }
 
 # ==============================================================================
-# STEP A: Configure Telemetry & Control Bridge (Modes 1 & 2)
+# STEP A: Configure Telemetry & Control Bridge
 # ==============================================================================
 if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
     echo ""
@@ -166,7 +165,7 @@ EOF
 fi
 
 # ==============================================================================
-# STEP B: Configure WebRTC Video Relay (Modes 2 & 3)
+# STEP B: Configure WebRTC Video Relay
 # ==============================================================================
 if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
     echo ""
