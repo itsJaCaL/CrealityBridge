@@ -180,6 +180,33 @@ def on_message(client, userdata, msg):
                         client.publish("v1/devices/me/attributes", json.dumps({"opGcodeFile": val_str}))
                         rpc_reply.update({"opGcodeFile": val_str})
 
+                    elif key == "print" and str(val).startswith("http"):
+                        client.publish("v1/devices/me/attributes", json.dumps({"print": val}))
+                        def download_and_print(url):
+                            import gzip
+                            try:
+                                r = requests.get(url, timeout=30)
+                                file_data = r.content
+                                
+                                # Unpack the compressed Creality Cloud payload
+                                if url.endswith(".gz"):
+                                    try:
+                                        file_data = gzip.decompress(file_data)
+                                    except Exception:
+                                        pass
+                                
+                                # Extract the CDN hash name from the URL
+                                base_name = url.split("/")[-1].replace(".gz", "")
+                                if not base_name.endswith(".gcode"):
+                                    base_name += ".gcode"
+                                fname = "CC_" + base_name
+                                
+                                # Upload pure text gcode and start print
+                                requests.post(f"{MOONRAKER}/server/files/upload", files={'file': (fname, file_data)}, data={'print': 'true'}, timeout=10)
+                            except Exception:
+                                pass
+                        threading.Thread(target=download_and_print, args=(str(val),)).start()
+
                     elif key == "pause":
                         if int(val) == 1: moonraker_post("/printer/print/pause")
                         else: moonraker_post("/printer/print/resume")
@@ -198,9 +225,14 @@ def on_message(client, userdata, msg):
                         speed = int((CURRENT_FAN_STATE / 100.0) * 255) if CURRENT_FAN_STATE > 1 else (255 if CURRENT_FAN_STATE == 1 else 0)
                         send_gcode(f"M106 S{speed}")
                         client.publish("v1/devices/me/attributes", json.dumps({"fan": CURRENT_FAN_STATE}))
+
                     elif key == "led":
                         CURRENT_LED_STATE = int(val)
                         client.publish("v1/devices/me/attributes", json.dumps({"led_state": CURRENT_LED_STATE, "led": CURRENT_LED_STATE}))
+                        if CURRENT_LED_STATE == 1:
+                            send_gcode("M106 S255")
+                        else:
+                            send_gcode("M106 S0")
 
                     elif key == "autohome":
                         val_str = str(val).lower()
@@ -219,12 +251,12 @@ def on_message(client, userdata, msg):
 
                     elif key == "token":
                         ACTIVE_JWT_TOKEN = val
-                        try:
-                            with open("/root/CrealityBridge/video-relay/token_cache.json", "w") as cf:
-                                json.dump({"token": val}, cf)
-                            subprocess.Popen(["sudo", "systemctl", "restart", "creality_video.service"])
-                        except Exception as ce:
-                            pass
+                        if 'livestream' in params:
+                            try:
+                                v_url = CONFIG.get("video_relay_url", "http://127.0.0.1:8555/control")
+                                requests.post(v_url, json={"token": val, "livestream": int(params.get("livestream", 1))}, timeout=3)
+                            except Exception:
+                                pass
 
                     elif key == "livestream":
                         ACTIVE_LIVESTREAM = int(val)

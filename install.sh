@@ -7,19 +7,20 @@ set -e
 
 REPO_RAW_URL="https://raw.githubusercontent.com/itsJaCaL/CrealityBridge/main"
 
-# Detect the real user even if run via sudo
-if [ -n "$SUDO_USER" ]; then
+# Enforce sudo but extract the REAL user
+if [[ $EUID -ne 0 ]]; then
+    echo -e "\033[1;31m[!] This script must be run with sudo: sudo bash $0\033[0m"
+    exit 1
+fi
+
+if [[ -n "$SUDO_USER" && "$SUDO_USER" != "root" ]]; then
     CURRENT_USER="$SUDO_USER"
 else
-    CURRENT_USER="${USER:-$(whoami)}"
+    echo -e "\033[1;31m[!] Do not run this directly as root. Run as your normal user with sudo.\033[0m"
+    exit 1
 fi
 
-if [ "$CURRENT_USER" = "root" ]; then
-    USER_HOME="/root"
-else
-    USER_HOME=$(eval echo "~$CURRENT_USER")
-fi
-
+USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
 INSTALL_DIR="$USER_HOME/CrealityBridge"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -41,13 +42,15 @@ print_banner
 
 if [[ "$1" == "--uninstall" ]]; then
     echo -e "${C_YELLOW}[*] Uninstalling services and removing files...${C_RESET}"
-    sudo systemctl stop creality_bridge.service 2>/dev/null || true
-    sudo systemctl disable creality_bridge.service 2>/dev/null || true
-    sudo rm -f /etc/systemd/system/creality_bridge.service
-    sudo systemctl stop creality_video.service 2>/dev/null || true
-    sudo systemctl disable creality_video.service 2>/dev/null || true
-    sudo systemctl daemon-reload
+    systemctl stop creality_bridge.service 2>/dev/null || true
+    systemctl disable creality_bridge.service 2>/dev/null || true
+    rm -f /etc/systemd/system/creality_bridge.service
+    systemctl stop creality_video.service 2>/dev/null || true
+    systemctl disable creality_video.service 2>/dev/null || true
+    rm -f /etc/systemd/system/creality_video.service
+    systemctl daemon-reload
     rm -rf "$INSTALL_DIR"
+    rm -rf "/root/CrealityBridge" 2>/dev/null || true
     echo -e "${C_GREEN}[+] Uninstalled cleanly!${C_RESET}"
     exit 0
 fi
@@ -84,7 +87,7 @@ fetch_file() {
 # ==============================================================================
 if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
     echo -e "\n${C_CYAN}============================================================${C_RESET}"
-    echo -e "${C_CYAN}               CREALITY CLOUD AUTHENTICATION                ${C_RESET}"
+    echo -e "${C_CYAN}                CREALITY CLOUD AUTHENTICATION                ${C_RESET}"
     echo -e "${C_CYAN}============================================================${C_RESET}"
     echo "To connect your printer to Creality Cloud:"
     echo "  1. Go to Creality Cloud -> Devices -> Add Device (Pi/Klipper)."
@@ -102,9 +105,9 @@ if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
     PRINTER_NAME="${PRINTER_NAME:-Klipper-Printer}"
 
     echo -e "\n${C_CYAN}Select Printer Model Profile:${C_RESET}"
-    echo "  [1] K2 Plus       (Unlocks ALL flagship controls: Flow, Speed, Extrude/Retract, Fans, CFS)"
-    echo "  [2] K1 Max        (Unlocks full high-speed Klipper controls: Flow, Speed, Extrude/Retract)"
-    echo "  [3] Ender-3 V3 KE (Standard Klipper bed-slinger profile)"
+    echo "  [1] K2 Plus        (Unlocks ALL flagship controls: Flow, Speed, Extrude/Retract, Fans, CFS)"
+    echo "  [2] K1 Max         (Unlocks full high-speed Klipper controls: Flow, Speed, Extrude/Retract)"
+    echo "  [3] Ender-3 V3 KE  (Standard Klipper bed-slinger profile)"
     echo "  [4] Ender-3 S1 Pro"
     echo "  [5] Custom Model Name"
     read -p "Select profile [default: 1]: " MODEL_CHOICE
@@ -136,9 +139,9 @@ if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
     fi
 
     echo -e "${C_YELLOW}[*] Checking Python dependencies for Bridge...${C_RESET}"
-    python3 -c "import paho.mqtt.client, requests" 2>/dev/null || {
+    sudo -u $CURRENT_USER python3 -c "import paho.mqtt.client, requests" 2>/dev/null || {
         echo -e "${C_YELLOW}[*] Installing paho-mqtt and requests...${C_RESET}"
-        pip3 install paho-mqtt requests --break-system-packages &>/dev/null || pip3 install paho-mqtt requests &>/dev/null
+        sudo -u $CURRENT_USER pip3 install paho-mqtt requests --break-system-packages &>/dev/null || sudo -u $CURRENT_USER pip3 install paho-mqtt requests &>/dev/null
     }
 
     fetch_file "bridge/creality_master_bridge.py" "$INSTALL_DIR/bridge/creality_master_bridge.py"
@@ -155,9 +158,10 @@ if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
     "video_relay_url": "$VIDEO_RELAY_URL"
 }
 EOF
+    chown -R $CURRENT_USER:$CURRENT_USER "$INSTALL_DIR"
 
     echo -e "${C_YELLOW}[*] Registering creality_bridge.service...${C_RESET}"
-    sudo tee /etc/systemd/system/creality_bridge.service > /dev/null << EOF
+    tee /etc/systemd/system/creality_bridge.service > /dev/null << EOF
 [Unit]
 Description=Creality Cloud Telemetry & Control Bridge
 After=network-online.target
@@ -175,9 +179,9 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable creality_bridge.service
-    sudo systemctl restart creality_bridge.service
+    systemctl daemon-reload
+    systemctl enable creality_bridge.service
+    systemctl restart creality_bridge.service
     echo -e "${C_GREEN}[+] Creality Master Bridge installed and started!${C_RESET}"
 fi
 
@@ -220,27 +224,26 @@ if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
     if [[ "$TOTAL_MEM_KB" -lt 2500000 && "$TOTAL_SWAP_KB" -lt 1000000 ]]; then
         echo -e "${C_YELLOW}[*] Low RAM detected. Creating 2GB safety swapfile...${C_RESET}"
         if [[ ! -f /swapfile ]]; then
-            sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 &>/dev/null
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile &>/dev/null
-            sudo swapon /swapfile
-            echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab > /dev/null
+            fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048 &>/dev/null
+            chmod 600 /swapfile
+            mkswap /swapfile &>/dev/null
+            swapon /swapfile
+            echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab > /dev/null
         fi
     fi
 
     echo -e "${C_YELLOW}[*] Installing system packages (FFmpeg & Dev Tools)...${C_RESET}"
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq python3-venv python3-pip python3-dev ffmpeg \
+    apt-get update -qq
+    apt-get install -y -qq python3-venv python3-pip python3-dev ffmpeg \
         libavdevice-dev libavfilter-dev libopus-dev libvpx-dev pkg-config \
         libsrtp2-dev libssl-dev libffi-dev curl
 
     echo -e "${C_YELLOW}[*] Building Python virtual environment (venv_video)...${C_RESET}"
-    python3 -m venv "$INSTALL_DIR/video-relay/venv_video"
-    source "$INSTALL_DIR/video-relay/venv_video/bin/activate"
+    sudo -u $CURRENT_USER python3 -m venv "$INSTALL_DIR/video-relay/venv_video"
     
     echo -e "${C_YELLOW}[*] Installing WebRTC & OpenCV Python packages (this may take a minute)...${C_RESET}"
-    pip install --upgrade pip &>/dev/null
-    pip install aiortc aiohttp websockets websocket-client requests paho-mqtt "numpy<2" opencv-python-headless &>/dev/null
+    sudo -u $CURRENT_USER "$INSTALL_DIR/video-relay/venv_video/bin/pip" install --upgrade pip &>/dev/null
+    sudo -u $CURRENT_USER "$INSTALL_DIR/video-relay/venv_video/bin/pip" install aiortc aiohttp websockets websocket-client requests paho-mqtt "numpy<2" opencv-python-headless &>/dev/null
 
     echo -e "${C_YELLOW}[*] Downloading official signaling scripts...${C_RESET}"
     curl -sSL "https://raw.githubusercontent.com/crealitycloud/OctoPrint-CrealityCloud-With-Video/master/octoprint_crealitycloud/signaling_channel.py" \
@@ -255,9 +258,10 @@ if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
     "rotation": $ROT_DEG
 }
 EOF
+    chown -R $CURRENT_USER:$CURRENT_USER "$INSTALL_DIR"
 
     echo -e "${C_YELLOW}[*] Registering creality_video.service...${C_RESET}"
-    sudo tee /etc/systemd/system/creality_video.service > /dev/null << EOF
+    tee /etc/systemd/system/creality_video.service > /dev/null << EOF
 [Unit]
 Description=Creality Cloud WebRTC Video Relay
 After=network-online.target
@@ -275,9 +279,9 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable creality_video.service
-    sudo systemctl restart creality_video.service
+    systemctl daemon-reload
+    systemctl enable creality_video.service
+    systemctl restart creality_video.service
     echo -e "${C_GREEN}[+] Creality WebRTC Video Relay installed and started!${C_RESET}"
 fi
 
@@ -285,5 +289,5 @@ echo -e "\n${C_CYAN}============================================================
 echo -e "${C_GREEN} [+] INSTALLATION COMPLETE!${C_RESET}"
 echo -e "     ${C_CYAN}Bridge Status :${C_RESET} sudo systemctl status creality_bridge.service"
 echo -e "     ${C_CYAN}Video Status  :${C_RESET} sudo systemctl status creality_video.service"
-echo -e "     ${C_CYAN}Uninstall     :${C_RESET} bash install.sh --uninstall"
+echo -e "     ${C_CYAN}Uninstall     :${C_RESET} sudo bash $0 --uninstall"
 echo -e "${C_CYAN}============================================================${C_RESET}"
