@@ -1,88 +1,104 @@
-# 🚀 Creality Cloud Universal Klipper Bridge & WebRTC Video Relay
+# Creality Cloud Universal Klipper Bridge & WebRTC Video Relay
 
-Connect **any** Klipper/Moonraker 3D printer (Raspberry Pi, BTT CB1/Manta, Sonic Pad, Nebula Pad) to Creality Cloud with full telemetry, remote G-code printing, UI profile unlocks, and ultra-low-latency WebRTC live video.
+Connect **any** Klipper/Moonraker 3D printer to the Creality Cloud ecosystem.
 
----
+Whether you are running a fully custom Raspberry Pi/BTT CB1 build, or a closed-ecosystem device like the **Creality Sonic Pad** or **Nebula Pad**, this bridge translates native Klipper/Moonraker telemetry into Creality's encrypted MQTT protocol. It enables full remote control, slicing, and monitoring from the Creality Cloud mobile app or web browser.
 
-## ✨ Key Features
+## ✨ Features
 
-* **Universal Compatibility:** Native support for Raspberry Pi, BTT CB1, Sonic Pads, and remote Linux servers (Proxmox/TrueNAS VMs).
-* **Zero-Latency WebRTC Video:** Powered by a decoupled background scraper and OpenCV that drops stale frames and streams absolute real-time MJPEG video without freezing or lag.
-* **Flagship UI Unlocks:** Choose your printer model profile (`K2 Plus`, `K1 Max`, `Ender-3 V3 KE`, `S1 Pro`, or `Custom`) to unlock high-speed controls and features in Creality Cloud.
-* **Full Telemetry & Control:** Live temperature monitoring, print progress tracking, file browsing, fan adjustments, LED toggling, and bed leveling routines.
+* **Universal Compatibility:** Works on any device running Moonraker (Raspberry Pi, CB1, TrueNAS/Proxmox VMs, Hacked Sonic Pad, Nebula Pad).
 
----
+* **Native WebRTC Video:** Low-latency live video streaming directly to the Creality Cloud app (supports multiple camera rotations and remote video nodes).
 
-## 📋 Step 1: Get Your `.tk` Token
+* **Intelligent State Management:** Automatically detects and clears Klipper "complete/cancelled/error" ghost states to prevent the app UI from freezing at 100%.
 
-1. Go to the [Creality Cloud Web Platform](https://www.crealitycloud.com) or use the mobile app.
-2. Navigate to **Workbench / Devices** ➔ Click **Add Device** ➔ Select **Raspberry Pi / Klipper**.
-3. Download the generated device configuration key package.
-4. Open the downloaded `.tk` file using any standard text editor (Notepad, TextEdit, Nano) and **copy the entire text string inside**.
+* **Robust Reconnection:** Built-in MQTT watchdog survives network dropouts and automatically resubscribes to command channels without requiring a reboot.
 
----
+* **Human-Readable Filenames:** Automatically extracts the real model names from cloud G-code payloads instead of displaying random UUID strings.
 
-## ⚡ Step 2: Quick Start Installation
+* **Flagship Controls Unlocked:** Supports target temperatures, speed/flow overrides, LED controls, part cooling fans, and live Z-axis reporting.
 
-SSH into your Klipper host machine and run the following commands sequentially:
+## ⚙️ Installation
 
-```bash
+### Step 1: Get Your Creality Cloud Key (`TB_TOKEN`)
+
+Before installing the script, you need to generate a secure token for your printer.
+
+1. Open the **Creality Cloud** mobile app.
+
+2. Navigate to **Workbench** -> Tap the **+** (Add Device) icon in the top right.
+
+3. Select **Raspberry Pi** (OctoPrint).
+
+4. Go to your Creality cloud on your PC (https://www.crealitycloud.com/en/workbench-beta)
+
+5. Open your Raspberry PI printer.
+
+6. Tap the 3 dots on the top right.
+
+7. Tap **Download Key File** (or copy the key directly if prompted).
+
+8. Open the downloaded `.tk` file with any text editor and copy the long text string. You will paste this into the installer.
+
+### Step 2: Run the Installer
+
+SSH into your Klipper host device (e.g., your Sonic Pad or Raspberry Pi) and run the following commands:
+
+```
 git clone https://github.com/itsJaCaL/CrealityBridge.git
 cd CrealityBridge
-chmod +x install.sh
 sudo bash install.sh
+
 ```
 
-### 🎛️ During the Interactive Installer:
-1. **Select your installation mode:**
-   * `[1]` **Telemetry & Control Bridge Only** *(Best for Sonic Pads, Nebula Pads, or setups without cameras)*
-   * `[2]` **All-in-One:** Bridge + Local WebRTC Video Relay *(Best for Pi 5, Pi 3B+, or BTT CB1 hosts)*
-   * `[3]` **Remote Video Relay Node Only** *(Best for a separate Proxmox/TrueNAS VM or home server)*
-2. **Paste the contents of your `.tk` file** when prompted.
-3. **Confirm your Moonraker API URL** (defaults to `[http://127.0.0.1:7125](http://127.0.0.1:7125)`).
-4. **Confirm your camera stream URL or printer IP** if prompted by your chosen mode.
+The interactive installer will ask you for:
 
----
+* Your copied `.tk` token.
 
-## ⚠️ Important Note for Sonic Pad & Nebula Pad Users
+* A display name for your printer.
 
-Due to firmware lockdowns and the lack of a native C compiler on Creality's official pads, these devices **only support Mode 1 (Telemetry & Control Bridge Only)**. Video streaming remains handled by the pad's native architecture, while Mode 1 successfully bridges your telemetry, UI profile unlocks, and remote printing capabilities to Creality Cloud.
+* Your printer profile type (e.g., K1 Max, Ender-3 V3, K2 Plus, etc.).
 
----
+* Your installation mode (Telemetry Only, All-in-One with Video, or Remote Video Node).
 
-## 🛠️ Management & Status
+## 🛠️ Service Management
 
-Check your background service logs or remove the bridge anytime using these commands:
+The installer runs the bridge as a background `systemd` service so it starts automatically when your printer boots up.
 
-* **Check Bridge Status:**
-  ```bash
-  sudo systemctl status creality_bridge.service
-  ```
-* **Check Video Relay Status:**
-  ```bash
-  sudo systemctl status creality_video.service
-  ```
-* **Complete Clean Uninstallation:**
-  ```bash
-  bash install.sh --uninstall
-  ```
+**Check Bridge Status/Logs:**
 
----
+```
+sudo systemctl status creality_bridge.service
+sudo journalctl -u creality_bridge.service -f
 
-## 🖨️ Creality Cloud Official Model Profile Identifiers
+```
 
-When selecting your printer profile during installation or mapping it in your config, these are the primary model strings recognized by Creality Cloud to unlock specific UI controls (such as high-speed Klipper tuning, pressure advance, or standard bed-slinger layouts):
+**Check Video Relay Status/Logs (If installed):**
 
-* **Flagship High-Speed Series:**
-  * `K2 Plus` *(Unlocks full flagship controls: Flow, Speed, Extrude/Retract, Fans, CFS)*
-  * `K1 Max` *(Unlocks full high-speed Klipper controls)*
-  * `K1`, `K1C`, `K1 SE`
-* **Modern Bed-Slingers:**
-  * `Ender-3 V3`, `Ender-3 V3 KE`, `Ender-3 V3 SE`
-  * `Ender-3 S1 Pro`, `Ender-3 S1`
-* **Classic & Community Machines (Map to standard profiles or Custom):**
-  * `Ender-3 V2`, `Ender-3 Pro`, `Ender-3`
-  * `Ender-5 Plus`, `Ender-5 S1`
-  * `CR-10 SE`, `CR-10 Smart Pro`
-* **Custom / DIY / Voron Builds:**
-  * Use option `[5]` (Custom Model Name) during the installer to input any custom string (e.g., `Voron 2.4`, `Mercury One.1`, or `Custom CoreXY`) if you want a custom title displayed on your Creality Cloud dashboard.
+```
+sudo systemctl status creality_video.service
+sudo journalctl -u creality_video.service -f
+
+```
+
+**Restart Services:**
+
+```
+sudo systemctl restart creality_bridge.service
+sudo systemctl restart creality_video.service
+
+```
+
+## 🗑️ Uninstallation
+
+To cleanly remove the bridge, video relay, and all background services, simply run the installer with the uninstall flag:
+
+```
+cd ~/CrealityBridge
+sudo bash install.sh --uninstall
+
+```
+
+## 📝 License
+
+This project is provided as-is for the 3D printing community. Please ensure you secure your `config.json` files, as they contain your private connection tokens.
