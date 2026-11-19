@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+
+# Per-install files: these hold account tokens or local state
+bridge/config.json
+bridge/config.json.*
+bridge/state_cache.json
+bridge/.cc_dl_*
+video-relay/video_config.json
+video-relay/token_cache.json
+video-relay/venv_video/
+video-relay/signaling_channel.py
+*.bak
+*.tmp
+*.log
+*.patch

@@ -51,6 +51,20 @@ if [[ "$1" == "--uninstall" ]]; then
     systemctl daemon-reload
     rm -rf "$INSTALL_DIR"
     rm -rf "/root/CrealityBridge" 2>/dev/null || true
+
+    if [[ -f /swapfile ]] && grep -qx '/swapfile none swap sw 0 0' /etc/fstab; then
+        echo -e "\n${C_YELLOW}[?] A 2 GB /swapfile is set up. The video installer creates one on low-RAM boards,"
+        echo -e "    but it may also be your own.${C_RESET}"
+        read -p "Remove /swapfile and its /etc/fstab line? (y/N): " RM_SWAP
+        if [[ "$RM_SWAP" =~ ^[Yy]$ ]]; then
+            swapoff /swapfile 2>/dev/null || true
+            sed -i '\|^/swapfile none swap sw 0 0$|d' /etc/fstab
+            rm -f /swapfile
+            echo -e "${C_GREEN}[+] Swapfile removed.${C_RESET}"
+        fi
+    fi
+    echo -e "${C_CYAN}[i] The pip packages paho-mqtt and requests were left installed for $CURRENT_USER (other tools may use them)."
+    echo -e "    To remove them: pip3 uninstall paho-mqtt requests${C_RESET}"
     echo -e "${C_GREEN}[+] Uninstalled cleanly!${C_RESET}"
     exit 0
 fi
@@ -78,9 +92,53 @@ fetch_file() {
             cp "$src_path" "$dest_path"
         fi
     else
-        curl -sSL "$REPO_RAW_URL/$rel_path" -o "$dest_path"
+        # -f: fail on HTTP errors instead of saving a "404: Not Found" page as the script
+        curl -fsSL "$REPO_RAW_URL/$rel_path" -o "$dest_path"
     fi
 }
+
+# write_json FILE KEY...
+# Merges keys into a JSON file (keeping any keys already there) and writes it with mode 600.
+# Each value comes from an env var, so quotes and backslashes can't break the JSON:
+#   JV_<key>  = string value     JR_<key> = raw JSON value (true/false/numbers)
+# Prefix a KEY with "?" to only set it when the file doesn't already have a non-empty value.
+write_json() {
+    local file="$1"; shift
+    JSON_FILE="$file" JSON_KEYS="$*" python3 - <<'PY'
+import json, os
+path = os.environ["JSON_FILE"]
+cfg = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+for key in os.environ["JSON_KEYS"].split():
+    only_if_missing = key.startswith("?")
+    key = key.lstrip("?")
+    if only_if_missing and cfg.get(key):
+        continue
+    if "JR_" + key in os.environ:
+        cfg[key] = json.loads(os.environ["JR_" + key])
+    elif "JV_" + key in os.environ:
+        cfg[key] = os.environ["JV_" + key]
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(cfg, f, indent=4)
+os.replace(tmp, path)
+PY
+}
+
+json_get() {  # json_get FILE KEY -> prints the value, or nothing
+    python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get(sys.argv[2]) or "")
+except Exception: pass' "$1" "$2" 2>/dev/null
+}
+
+# Shared secret between the bridge and the video relay's /control endpoint (mode 2 writes both ends).
+RELAY_SECRET="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 32)"
 
 # ==============================================================================
 # STEP A: Configure Telemetry & Control Bridge
@@ -90,14 +148,32 @@ if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
     echo -e "${C_CYAN}                CREALITY CLOUD AUTHENTICATION                ${C_RESET}"
     echo -e "${C_CYAN}============================================================${C_RESET}"
     echo "To connect your printer to Creality Cloud:"
-    echo "  1. Go to Creality Cloud -> Devices -> Add Device (Pi/Klipper)."
-    echo "  2. Download your printer key files."
-    echo "  3. Open the downloaded .tk file with a text editor & copy text."
+    echo "  1. In the Creality Cloud app: Workbench -> + -> Raspberry Pi (adds the device)."
+    echo "  2. Sign in below with the same Creality Cloud email and password."
+    echo "     (Your password is used once to fetch the key and is never saved.)"
     echo -e "${C_CYAN}============================================================${C_RESET}\n"
+    BRIDGE_CONFIG="$INSTALL_DIR/bridge/config.json"
+    EXISTING_TB="$(json_get "$BRIDGE_CONFIG" tb_token)"
+    HAS_SIGNIN="false"
+    [[ -n "$EXISTING_TB" && "$EXISTING_TB" != CC_* ]] && HAS_SIGNIN="true"
 
-    while [[ -z "$JWT_TOKEN" ]]; do
-        read -p "Paste the contents of your .tk file (Token): " JWT_TOKEN
-    done
+    echo "  [1] Sign in with email (recommended)"
+    echo "  [2] Paste a downloaded .tk key file instead"
+    if [[ "$HAS_SIGNIN" == "true" ]]; then
+        echo "  [3] Keep this printer's existing sign-in (reinstall/update)"
+    fi
+    read -p "Select [default: 1]: " AUTH_MODE
+    AUTH_MODE="${AUTH_MODE:-1}"
+    JWT_TOKEN=""
+    if [[ "$AUTH_MODE" == "2" ]]; then
+        while [[ -z "$JWT_TOKEN" ]]; do
+            read -p "Paste the contents of your .tk file (Token): " JWT_TOKEN
+        done
+    elif [[ "$AUTH_MODE" == "3" && "$HAS_SIGNIN" == "true" ]]; then
+        AUTH_MODE="3"
+    else
+        AUTH_MODE="1"
+    fi
 
     RANDOM_KEY="CC_$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)"
 
@@ -125,40 +201,64 @@ if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
 
     VIDEO_ENABLED="false"
     VIDEO_RELAY_URL="http://127.0.0.1:8555/control"
+    BRIDGE_RELAY_SECRET=""
 
     if [[ "$INSTALL_MODE" == "2" ]]; then
         VIDEO_ENABLED="true"
         VIDEO_RELAY_URL="http://127.0.0.1:8555/control"
+        BRIDGE_RELAY_SECRET="$RELAY_SECRET"
     elif [[ "$INSTALL_MODE" == "1" ]]; then
         read -p "Are you running a Remote Video Relay VM on another IP? (y/N): " HAS_REMOTE_VID
         if [[ "$HAS_REMOTE_VID" =~ ^[Yy]$ ]]; then
             VIDEO_ENABLED="true"
             read -p "Enter Remote Video Relay IP (e.g., 192.168.128.230): " REMOTE_VID_IP
             VIDEO_RELAY_URL="http://${REMOTE_VID_IP}:8555/control"
+            read -p "Enter the relay secret printed by the relay node's installer: " BRIDGE_RELAY_SECRET
         fi
     fi
 
     echo -e "${C_YELLOW}[*] Checking Python dependencies for Bridge...${C_RESET}"
-    sudo -u $CURRENT_USER python3 -c "import paho.mqtt.client, requests" 2>/dev/null || {
+    if ! sudo -u $CURRENT_USER python3 -c "import paho.mqtt.client, requests" 2>/dev/null; then
         echo -e "${C_YELLOW}[*] Installing paho-mqtt and requests...${C_RESET}"
-        sudo -u $CURRENT_USER pip3 install paho-mqtt requests --break-system-packages &>/dev/null || sudo -u $CURRENT_USER pip3 install paho-mqtt requests &>/dev/null
-    }
+        PIP_LOG="$INSTALL_DIR/bridge/pip-install.log"
+        { sudo -u $CURRENT_USER pip3 install paho-mqtt requests --break-system-packages \
+            || sudo -u $CURRENT_USER pip3 install paho-mqtt requests; } >"$PIP_LOG" 2>&1 || true
+        if ! sudo -u $CURRENT_USER python3 -c "import paho.mqtt.client, requests" 2>/dev/null; then
+            echo -e "${C_RED}[!] Could not install paho-mqtt / requests. Last lines of the pip output:${C_RESET}"
+            tail -n 25 "$PIP_LOG"
+            echo -e "${C_RED}    Full log: $PIP_LOG${C_RESET}"
+            exit 1
+        fi
+    fi
 
     fetch_file "bridge/creality_master_bridge.py" "$INSTALL_DIR/bridge/creality_master_bridge.py"
+    fetch_file "bridge/creality_login.py" "$INSTALL_DIR/bridge/creality_login.py"
 
-    cat << EOF > "$INSTALL_DIR/bridge/config.json"
-{
-    "tb_token": "$RANDOM_KEY",
-    "jwt_token": "$JWT_TOKEN",
-    "broker": "mqtt.crealitycloud.com",
-    "moonraker_url": "$MOONRAKER_URL",
-    "printer_name": "$PRINTER_NAME",
-    "printer_model": "$PRINTER_MODEL",
-    "video_enabled": $VIDEO_ENABLED,
-    "video_relay_url": "$VIDEO_RELAY_URL"
-}
-EOF
+    # Reinstalls merge into the existing config, so a working tb_token and any custom settings
+    # (LED macros etc.) survive even if the new sign-in fails. Keep a copy of the old file too.
+    if [[ -f "$BRIDGE_CONFIG" ]]; then
+        cp -p "$BRIDGE_CONFIG" "$BRIDGE_CONFIG.preinstall.bak"
+        chmod 600 "$BRIDGE_CONFIG.preinstall.bak"
+    fi
+    CONFIG_KEYS="?tb_token broker moonraker_url printer_name printer_model video_enabled video_relay_url"
+    CONFIG_KEYS+=" ?led_on_gcode ?led_off_gcode ?auto_clear_seconds ?auto_clear_errors"
+    [[ -n "$JWT_TOKEN" ]] && CONFIG_KEYS+=" jwt_token"
+    [[ -n "$BRIDGE_RELAY_SECRET" ]] && CONFIG_KEYS+=" video_relay_secret"
+    JV_tb_token="$RANDOM_KEY" JV_jwt_token="$JWT_TOKEN" JV_broker="mqtt.crealitycloud.com" \
+    JV_moonraker_url="$MOONRAKER_URL" JV_printer_name="$PRINTER_NAME" JV_printer_model="$PRINTER_MODEL" \
+    JR_video_enabled="$VIDEO_ENABLED" JV_video_relay_url="$VIDEO_RELAY_URL" JV_video_relay_secret="$BRIDGE_RELAY_SECRET" \
+    JV_led_on_gcode="" JV_led_off_gcode="" JR_auto_clear_seconds="8" JR_auto_clear_errors="false" \
+        write_json "$BRIDGE_CONFIG" $CONFIG_KEYS
     chown -R $CURRENT_USER:$CURRENT_USER "$INSTALL_DIR"
+
+    if [[ "$AUTH_MODE" == "1" ]]; then
+        echo -e "\n${C_CYAN}[*] Signing in to Creality Cloud...${C_RESET}"
+        sudo -u $CURRENT_USER python3 "$INSTALL_DIR/bridge/creality_login.py" --config "$BRIDGE_CONFIG" --no-restart-hint || {
+            echo -e "${C_YELLOW}[!] Sign-in did not finish. The service is still being installed; finish later with:${C_RESET}"
+            echo "      python3 $INSTALL_DIR/bridge/creality_login.py --config $INSTALL_DIR/bridge/config.json"
+            echo "      sudo systemctl restart creality_bridge.service"
+        }
+    fi
 
     echo -e "${C_YELLOW}[*] Registering creality_bridge.service...${C_RESET}"
     tee /etc/systemd/system/creality_bridge.service > /dev/null << EOF
@@ -242,22 +342,39 @@ if [[ "$INSTALL_MODE" == "2" || "$INSTALL_MODE" == "3" ]]; then
     sudo -u $CURRENT_USER python3 -m venv "$INSTALL_DIR/video-relay/venv_video"
     
     echo -e "${C_YELLOW}[*] Installing WebRTC & OpenCV Python packages (this may take a minute)...${C_RESET}"
-    sudo -u $CURRENT_USER "$INSTALL_DIR/video-relay/venv_video/bin/pip" install --upgrade pip &>/dev/null
-    sudo -u $CURRENT_USER "$INSTALL_DIR/video-relay/venv_video/bin/pip" install aiortc aiohttp websockets websocket-client requests paho-mqtt "numpy<2" opencv-python-headless &>/dev/null
+    VENV_PIP="$INSTALL_DIR/video-relay/venv_video/bin/pip"
+    VIDEO_PIP_LOG="$INSTALL_DIR/video-relay/pip-install.log"
+    {
+        sudo -u $CURRENT_USER "$VENV_PIP" install --upgrade pip &&
+        sudo -u $CURRENT_USER "$VENV_PIP" install aiortc aiohttp websockets websocket-client requests paho-mqtt "numpy<2" opencv-python-headless
+    } >"$VIDEO_PIP_LOG" 2>&1 || true
+    if ! sudo -u $CURRENT_USER "$INSTALL_DIR/video-relay/venv_video/bin/python3" -c "import aiortc, aiohttp, websocket, cv2, numpy" 2>/dev/null; then
+        echo -e "${C_RED}[!] The video relay's Python packages did not install. Last lines of the pip output:${C_RESET}"
+        tail -n 25 "$VIDEO_PIP_LOG"
+        echo -e "${C_RED}    Full log: $VIDEO_PIP_LOG${C_RESET}"
+        exit 1
+    fi
 
     echo -e "${C_YELLOW}[*] Downloading official signaling scripts...${C_RESET}"
-    curl -sSL "https://raw.githubusercontent.com/crealitycloud/OctoPrint-CrealityCloud-With-Video/master/octoprint_crealitycloud/signaling_channel.py" \
+    # Pinned to a known commit so a change upstream can't silently break (or alter) installs.
+    SIGNALING_COMMIT="42622164d97a006cfe10a54327bb3db4c17d5837"
+    curl -fsSL "https://raw.githubusercontent.com/crealitycloud/OctoPrint-CrealityCloud-With-Video/${SIGNALING_COMMIT}/octoprint_crealitycloud/signaling_channel.py" \
         -o "$INSTALL_DIR/video-relay/signaling_channel.py"
 
     fetch_file "video-relay/webrtc_manager.py" "$INSTALL_DIR/video-relay/webrtc_manager.py"
     fetch_file "video-relay/webrtc_relay.py" "$INSTALL_DIR/video-relay/webrtc_relay.py"
 
-    cat << EOF > "$INSTALL_DIR/video-relay/video_config.json"
-{
-    "camera_url": "$CAM_URL",
-    "rotation": $ROT_DEG
-}
-EOF
+    VIDEO_CONFIG="$INSTALL_DIR/video-relay/video_config.json"
+    if [[ "$INSTALL_MODE" == "3" ]]; then
+        # Remote node: reachable from the LAN, so /control requires the shared secret.
+        # Keep an existing secret so already-configured bridges keep working after a reinstall.
+        JV_camera_url="$CAM_URL" JR_rotation="$ROT_DEG" JV_bind_host="0.0.0.0" JV_control_secret="$RELAY_SECRET" \
+            write_json "$VIDEO_CONFIG" camera_url rotation bind_host ?control_secret
+    else
+        # Same box as the bridge: loopback only.
+        JV_camera_url="$CAM_URL" JR_rotation="$ROT_DEG" JV_bind_host="127.0.0.1" JV_control_secret="$RELAY_SECRET" \
+            write_json "$VIDEO_CONFIG" camera_url rotation bind_host control_secret
+    fi
     chown -R $CURRENT_USER:$CURRENT_USER "$INSTALL_DIR"
 
     echo -e "${C_YELLOW}[*] Registering creality_video.service...${C_RESET}"
@@ -283,6 +400,10 @@ EOF
     systemctl enable creality_video.service
     systemctl restart creality_video.service
     echo -e "${C_GREEN}[+] Creality WebRTC Video Relay installed and started!${C_RESET}"
+    if [[ "$INSTALL_MODE" == "3" ]]; then
+        echo -e "\n${C_YELLOW}[!] Relay secret: $(json_get "$VIDEO_CONFIG" control_secret)${C_RESET}"
+        echo    "    Enter this when installing the bridge on the printer (mode 1, remote relay)."
+    fi
 fi
 
 echo -e "\n${C_CYAN}============================================================${C_RESET}"

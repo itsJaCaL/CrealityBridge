@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import json, time, requests, threading, os, sys, uuid, random, socket, subprocess, traceback
+import json, time, requests, threading, os, sys, uuid, random, socket, subprocess, traceback, re, io, gzip, shutil, tempfile
 import paho.mqtt.client as mqtt
 
 # --- CONFIGURATION ---
@@ -16,6 +16,20 @@ BROKER = CONFIG.get("broker", "mqtt.crealitycloud.com")
 MOONRAKER = CONFIG.get("moonraker_url", "http://127.0.0.1:7125").rstrip("/")
 PRINTER_NAME = CONFIG.get("printer_name", "Larry")
 PRINTER_MODEL = CONFIG.get("printer_model", "Ender-3 S1 Pro")
+VIDEO_ENABLED = bool(CONFIG.get("video_enabled", False))
+VIDEO_RELAY_URL = CONFIG.get("video_relay_url", "http://127.0.0.1:8555/control")
+VIDEO_RELAY_SECRET = CONFIG.get("video_relay_secret", "")
+# The cloud app's "LED" button. Empty = do nothing (it used to drive the part fan).
+# Examples: "SET_LED LED=chamber WHITE=1" / "SET_PIN PIN=caselight VALUE=1"
+LED_ON_GCODE = CONFIG.get("led_on_gcode", "")
+LED_OFF_GCODE = CONFIG.get("led_off_gcode", "")
+# Seconds after complete/cancelled before the bridge resets Klipper's print state for the cloud UI.
+AUTO_CLEAR_SECONDS = float(CONFIG.get("auto_clear_seconds", 8))
+# Klipper "error" states are left alone by default so you can read them in Mainsail/Fluidd.
+AUTO_CLEAR_ERRORS = bool(CONFIG.get("auto_clear_errors", False))
+# Creality's broker only listens on plain 1883 today; these exist in case that changes.
+MQTT_PORT = int(CONFIG.get("mqtt_port", 1883))
+MQTT_TLS = bool(CONFIG.get("mqtt_tls", False))
 
 # --- GLOBALS ---
 CURRENT_PRINT_ID = ""
@@ -32,6 +46,126 @@ LAST_ATTR_PAYLOAD = ""
 
 def log(msg):
     print(msg, flush=True)
+
+SECRET_KEYS = {"token", "jwtToken", "tbToken", "jwt_token", "tb_token", "accessToken"}
+
+def mask(secret):
+    s = str(secret or "")
+    return f"<redacted ...{s[-4:]}>" if len(s) > 8 else "<redacted>"
+
+def redact(obj):
+    """Copy of obj with any credential-looking fields masked, safe to log."""
+    if isinstance(obj, dict):
+        return {k: (mask(v) if k in SECRET_KEYS else redact(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [redact(v) for v in obj]
+    if isinstance(obj, str) and "://" in obj:
+        return redact_url_in(obj)
+    return obj
+
+def save_config():
+    """Write CONFIG atomically, readable only by the bridge's user."""
+    tmp = CONFIG_PATH + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as cf:
+        json.dump(CONFIG, cf, indent=4)
+    os.replace(tmp, CONFIG_PATH)
+
+def safe_url(url):
+    """Download links are often pre-signed; never log the query string."""
+    return str(url).split("?")[0]
+
+def redact_url_in(text):
+    """Strip query strings from any URLs inside free text (e.g. exception messages)."""
+    # Covers full URLs and the bare "/path?query" form requests uses in its error messages.
+    return re.sub(r"((?:https?://|/)[^\s?'\"]*)\?[^\s'\")]*", r"\1?<redacted>", str(text))
+
+SAFE_OBJECT_NAME = re.compile(r"[\w.\-]+")  # use with fullmatch()
+
+def as_temp(val):
+    """Cloud temperature value -> number for M104/M140, or None if it isn't one."""
+    try:
+        t = float(val)
+    except (TypeError, ValueError):
+        return None
+    return int(t) if t == int(t) else round(t, 1)
+
+class StreamingMultipart:
+    """multipart/form-data body that streams a file from disk instead of holding it in RAM."""
+
+    def __init__(self, field, filename, path, fields=None):
+        boundary = uuid.uuid4().hex
+        self.content_type = f"multipart/form-data; boundary={boundary}"
+        head = ""
+        for k, v in (fields or {}).items():
+            head += f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'
+        head += (f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
+                 f'Content-Type: application/octet-stream\r\n\r\n')
+        tail = f"\r\n--{boundary}--\r\n".encode()
+        self._parts = [io.BytesIO(head.encode()), open(path, "rb"), io.BytesIO(tail)]
+        self._len = len(head.encode()) + os.path.getsize(path) + len(tail)
+
+    def __len__(self):
+        return self._len
+
+    def read(self, size=-1):
+        out = b""
+        while self._parts and (size < 0 or len(out) < size):
+            chunk = self._parts[0].read(-1 if size < 0 else size - len(out))
+            if chunk:
+                out += chunk
+            else:
+                self._parts.pop(0).close()
+        return out
+
+    def __iter__(self):
+        while True:
+            chunk = self.read(1024 * 1024)
+            if not chunk:
+                return
+            yield chunk
+
+    def close(self):
+        for p in self._parts:
+            p.close()
+        self._parts = []
+
+_LAYER_META = {}
+
+def get_layer_meta(filename):
+    """Layer heights for a G-code file from Moonraker's metadata (cached per file)."""
+    if not filename:
+        return {}
+    if filename in _LAYER_META:
+        return _LAYER_META[filename]
+    try:
+        r = requests.get(f"{MOONRAKER}/server/files/metadata", params={"filename": filename}, timeout=2)
+        if r.status_code != 200:
+            return {}
+        m = r.json().get("result", {})
+    except Exception:
+        return {}  # don't cache a failed lookup
+    meta = {}
+    try:
+        lh = float(m.get("layer_height") or 0)
+        if lh > 0:
+            meta["layer_height"] = lh
+            meta["first_layer_height"] = float(m.get("first_layer_height") or lh)
+            if m.get("object_height"):
+                meta["object_height"] = float(m["object_height"])
+        if m.get("layer_count"):
+            meta["layer_count"] = int(m["layer_count"])  # the slicer's own count wins
+    except (TypeError, ValueError):
+        meta = {}
+    _LAYER_META[filename] = meta
+    return meta
+
+def layer_at_z(z, meta):
+    lh = meta.get("layer_height", 0.2)
+    first = meta.get("first_layer_height", lh)
+    if z <= first + 0.01:
+        return 1
+    return int(round((z - first) / lh)) + 1
 
 def load_state_cache():
     global CURRENT_PRINT_ID, PRINT_START_TIME, CLOUD_PRINT_URL
@@ -144,17 +278,20 @@ def get_web_file_array(page_num_1based, origin=0):
         fsize = int(f.get("size", 0))
         fdate = int(f.get("modified", 0))
         result.append({
-            "address": "", "path": path_prefix, "name": safe_name, "fileName": safe_name,
+            # The app sends "path" back verbatim as opGcodeFile when you press print,
+            # so it must be the full path, not just the folder.
+            "address": "", "path": f"{path_prefix}/{safe_name}", "name": safe_name, "fileName": safe_name,
             "size": fsize, "file_size": fsize, "time": fdate, "file_create_time": fdate,
             "thumbnail": "", "isSelect": False
         })
     return result
 
 def import_cloud_device():
+    """Refresh tb_token from the saved key. Returns False only if the cloud couldn't be reached."""
     global TB_TOKEN
     try:
         if not JWT_TOKEN:
-            return
+            return True
         url = "https://api.crealitycloud.com/api/cxy/v2/device/user/importDevice"
         req_id = "Raspberry" + str(int(time.time()) % 10000) + "10" + str(int(random.random() * 89999 + 10000))
         headers = {
@@ -171,20 +308,27 @@ def import_cloud_device():
         data = json.dumps({"mac": mac, "iotType": 1, "deviceName": PRINTER_MODEL})
         res = requests.post(url, data=data, headers=headers, timeout=5)
         res_json = res.json()
-        log(f"[*] Cloud Import Response: {res.text}")
+        log(f"[*] Cloud Import Response: HTTP {res.status_code}, code={res_json.get('code')} msg={res_json.get('msg')!r}")
         if res_json.get("code") == 0 and res_json.get("result"):
             new_tb = res_json["result"].get("tbToken")
             if new_tb:
                 TB_TOKEN = new_tb
-                log(f"[*] Dynamically acquired provisioned tbToken: {TB_TOKEN}")
+                log(f"[*] Acquired provisioned tbToken {mask(TB_TOKEN)}")
                 try:
                     CONFIG["tb_token"] = new_tb
-                    with open(CONFIG_PATH, "w") as cf:
-                        json.dump(CONFIG, cf, indent=4)
+                    save_config()
                 except Exception as se:
                     log(f"[-] Could not persist tbToken to config.json: {se}")
+        elif res_json.get("code") != 0:
+            log("[!] Cloud import was refused (the saved key is probably expired). The existing tb_token is still in use.")
+            log(f"[!] If the printer shows offline, run: python3 {os.path.join(BASE_DIR, 'creality_login.py')} --config {CONFIG_PATH}")
+        return True
+    except requests.exceptions.RequestException as e:
+        log(f"[-] Cloud import: cloud unreachable ({type(e).__name__}); will retry.")
+        return False
     except Exception as e:
         log(f"[-] Cloud Import Exception: {e}")
+        return True
 
 def on_message(client, userdata, msg):
     global CURRENT_FAN_STATE, CURRENT_LED_STATE, ACTIVE_LIVESTREAM, ACTIVE_JWT_TOKEN
@@ -197,7 +341,7 @@ def on_message(client, userdata, msg):
 
         noisy_keys = {"pFileList", "uFileList", "printObjects"}
         if not (method == "get" and set(params.keys()).issubset(noisy_keys)):
-            log(f"[<<< MQTT INCOMING <<<] Topic: {topic} | Payload: {json.dumps(payload)}")
+            log(f"[<<< MQTT INCOMING <<<] Topic: {topic} | Payload: {json.dumps(redact(payload))}")
 
         if "v1/devices/me/rpc/request/" in topic:
             req_id = topic.split("/")[-1]
@@ -221,7 +365,7 @@ def on_message(client, userdata, msg):
 
                 for key, val in params.items():
                     if key not in noisy_keys:
-                        log(f"[EXECUTE] {key} -> {repr(val)}")
+                        log(f"[EXECUTE] {key} -> {mask(val) if key in SECRET_KEYS else repr(redact(val))}")
 
                     if key == "printId":
                         continue
@@ -232,11 +376,13 @@ def on_message(client, userdata, msg):
                         rpc_reply["result"] = objs
 
                     elif key in ["excludeObjects", "excludeObject"]:
-                        if isinstance(val, list):
-                            for obj_name in val:
+                        names = val if isinstance(val, list) else ([val] if isinstance(val, str) and val else [])
+                        for obj_name in names:
+                            obj_name = str(obj_name).strip()
+                            if SAFE_OBJECT_NAME.fullmatch(obj_name):
                                 send_gcode(f"EXCLUDE_OBJECT NAME={obj_name}")
-                        elif isinstance(val, str) and val:
-                            send_gcode(f"EXCLUDE_OBJECT NAME={val}")
+                            else:
+                                log(f"[-] Ignoring exclude request with unsafe object name: {obj_name!r}")
                         rpc_reply[key] = val
 
                     elif key == "pFileList":
@@ -272,8 +418,18 @@ def on_message(client, userdata, msg):
 
                     elif key == "opGcodeFile":
                         val_str = str(val)
-                        if "/local/" in val_str or val_str in ["/local", "/usb"]:
-                            fname = val_str.split("/local/")[-1] if "/local/" in val_str else ""
+                        fname = ""
+                        for prefix in ("/local/", "/usb/"):
+                            if prefix in val_str:
+                                fname = val_str.split(prefix, 1)[-1].strip()
+                                break
+                        is_file_cmd = val_str.startswith(("/local", "/usb"))
+                        if is_file_cmd and not fname:
+                            # Never guess: an empty name used to start the newest file on disk.
+                            log(f"[-] Ignoring opGcodeFile with no filename: {val_str!r}")
+                            rpc_reply.update({"opGcodeFile": val_str, "error": "no filename"})
+                            continue
+                        if fname:
                             if not CURRENT_PRINT_ID:
                                 CURRENT_PRINT_ID = str(uuid.uuid4()).replace("-", "")[:24]
                             PRINT_START_TIME = int(time.time())
@@ -285,13 +441,7 @@ def on_message(client, userdata, msg):
                             send_gcode("SDCARD_RESET_FILE")
                             time.sleep(0.5)
                             
-                            if fname.strip():
-                                moonraker_post("/printer/print/start", {"filename": fname})
-                            else:
-                                files = get_clean_moonraker_files()
-                                if files:
-                                    fallback_name = sanitize_filename(files[0].get("path", ""))
-                                    moonraker_post("/printer/print/start", {"filename": fallback_name})
+                            moonraker_post("/printer/print/start", {"filename": fname})
                         LAST_ATTR_PAYLOAD = ""
                         client.publish("v1/devices/me/attributes", json.dumps({"opGcodeFile": val_str}))
                         rpc_reply.update({"opGcodeFile": val_str})
@@ -309,20 +459,33 @@ def on_message(client, userdata, msg):
 
                         def download_and_print(url):
                             global IS_DOWNLOADING, CURRENT_PRINT_ID
-                            import gzip, re
+                            # Stream to disk next to the bridge (not /tmp, which can be RAM-backed)
+                            # so large prints don't have to fit in memory on 1 GB boards.
+                            tmp_files = []
+                            body = None
                             try:
-                                log(f"[*] Downloading Cloud G-code: {url}")
-                                r = requests.get(url, timeout=60)
-                                file_data = r.content
+                                log(f"[*] Downloading Cloud G-code: {safe_url(url)}")
+                                fd, raw_path = tempfile.mkstemp(prefix=".cc_dl_", dir=BASE_DIR)
+                                tmp_files.append(raw_path)
+                                with os.fdopen(fd, "wb") as out, requests.get(url, stream=True, timeout=60) as r:
+                                    r.raise_for_status()
+                                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                                        out.write(chunk)
                                 client.publish("v1/devices/me/telemetry", json.dumps({"dProgress": 50}))
 
-                                if url.endswith(".gz"):
-                                    try:
-                                        file_data = gzip.decompress(file_data)
-                                    except Exception:
-                                        pass
+                                gcode_path = raw_path
+                                with open(raw_path, "rb") as f:
+                                    is_gzip = f.read(2) == b"\x1f\x8b"
+                                if is_gzip:
+                                    fd, gcode_path = tempfile.mkstemp(prefix=".cc_dl_", dir=BASE_DIR)
+                                    tmp_files.append(gcode_path)
+                                    with gzip.open(raw_path, "rb") as src, os.fdopen(fd, "wb") as dst:
+                                        shutil.copyfileobj(src, dst, 1024 * 1024)
+                                    os.remove(raw_path)
+                                    tmp_files.remove(raw_path)
 
-                                text_data = file_data[:32768].decode('utf-8', errors='ignore')
+                                with open(gcode_path, "rb") as f:
+                                    text_data = f.read(32768).decode('utf-8', errors='ignore')
                                 real_name = ""
 
                                 match = re.search(r';\s*model_name\s*[:=]\s*([^\r\n]+)', text_data, re.IGNORECASE)
@@ -343,10 +506,13 @@ def on_message(client, userdata, msg):
                                     real_name += ".gcode"
 
                                 if not real_name:
-                                    base_name = url.split("/")[-1].replace(".gz", "")
+                                    base_name = safe_url(url).split("/")[-1].replace(".gz", "")
                                     real_name = "CC_" + base_name
                                     if not real_name.endswith(".gcode"):
                                         real_name += ".gcode"
+
+                                # The name comes from inside the file: keep it a plain filename.
+                                real_name = re.sub(r"[^\w.\-]", "_", real_name).lstrip(".") or "CC_print.gcode"
 
                                 log(f"[+] Uploading '{real_name}' to Moonraker & starting print (printId={CURRENT_PRINT_ID})...")
                                 client.publish("v1/devices/me/telemetry", json.dumps({"dProgress": 100}))
@@ -355,15 +521,25 @@ def on_message(client, userdata, msg):
                                 send_gcode("SDCARD_RESET_FILE")
                                 time.sleep(0.5)
                                 
-                                requests.post(
+                                body = StreamingMultipart("file", real_name, gcode_path, {"print": "true"})
+                                up = requests.post(
                                     f"{MOONRAKER}/server/files/upload",
-                                    files={'file': (real_name, file_data)},
-                                    data={'print': 'true'},
-                                    timeout=30
+                                    data=body,
+                                    headers={"Content-Type": body.content_type},
+                                    timeout=120
                                 )
+                                up.raise_for_status()
                             except Exception as de:
-                                log(f"[-] Download/Upload Error: {de}")
+                                log(f"[-] Download/Upload Error: {redact_url_in(str(de))}")
                                 IS_DOWNLOADING = False
+                            finally:
+                                if body is not None:
+                                    body.close()
+                                for p in tmp_files:
+                                    try:
+                                        os.remove(p)
+                                    except OSError:
+                                        pass
                         threading.Thread(target=download_and_print, args=(str(val),)).start()
 
                     elif key == "pause":
@@ -383,11 +559,12 @@ def on_message(client, userdata, msg):
                             "print": "", "filename": "", "printFileName": ""
                         }))
 
-                    elif key in ["nozzleTemp", "nozzleTemp2"]:
-                        send_gcode(f"M104 S{val}")
-                        LAST_ATTR_PAYLOAD = ""
-                    elif key in ["bedTemp", "bedTemp2"]:
-                        send_gcode(f"M140 S{val}")
+                    elif key in ["nozzleTemp", "nozzleTemp2", "bedTemp", "bedTemp2"]:
+                        temp = as_temp(val)
+                        if temp is None:
+                            log(f"[-] Ignoring non-numeric {key}: {val!r}")
+                        else:
+                            send_gcode(f"{'M104' if key.startswith('nozzle') else 'M140'} S{temp}")
                         LAST_ATTR_PAYLOAD = ""
 
                     elif key == "fan":
@@ -399,10 +576,11 @@ def on_message(client, userdata, msg):
                     elif key == "led":
                         CURRENT_LED_STATE = int(val)
                         LAST_ATTR_PAYLOAD = ""
-                        if CURRENT_LED_STATE == 1:
-                            send_gcode("M106 S255")
+                        led_cmd = LED_ON_GCODE if CURRENT_LED_STATE == 1 else LED_OFF_GCODE
+                        if led_cmd:
+                            send_gcode(led_cmd)
                         else:
-                            send_gcode("M106 S0")
+                            log("[*] LED toggled in the app, but led_on_gcode/led_off_gcode are not set in config.json.")
 
                     elif key == "autohome":
                         val_str = str(val).lower()
@@ -424,8 +602,9 @@ def on_message(client, userdata, msg):
                         ACTIVE_JWT_TOKEN = val
                         if 'livestream' in params:
                             try:
-                                v_url = CONFIG.get("video_relay_url", "http://127.0.0.1:8555/control")
-                                requests.post(v_url, json={"token": val, "livestream": int(params.get("livestream", 1))}, timeout=3)
+                                hdrs = {"X-Relay-Secret": VIDEO_RELAY_SECRET} if VIDEO_RELAY_SECRET else {}
+                                requests.post(VIDEO_RELAY_URL, json={"token": val, "livestream": int(params.get("livestream", 1))},
+                                              headers=hdrs, timeout=3)
                             except Exception:
                                 pass
 
@@ -441,7 +620,10 @@ def on_message(client, userdata, msg):
 def main():
     global CURRENT_PRINT_ID, PRINT_START_TIME, CLOUD_PRINT_URL, IS_DOWNLOADING, DOWNLOAD_LOCK_TIME, LAST_LOGGED_STATE, LAST_ATTR_PAYLOAD
     load_state_cache()
-    import_cloud_device()
+    imported = import_cloud_device()
+    if TB_TOKEN.startswith("CC_") and not JWT_TOKEN:
+        log("[!] This bridge has not been signed in to Creality Cloud yet, so the cloud will refuse it. Run:")
+        log(f"[!]   python3 {os.path.join(BASE_DIR, 'creality_login.py')} --config {CONFIG_PATH}")
     try:
         init_res = requests.get(f"{MOONRAKER}/printer/objects/query?print_stats", timeout=2)
         if init_res.status_code == 200:
@@ -462,16 +644,34 @@ def main():
     except AttributeError:
         client = mqtt.Client()
 
-    client.username_pw_set(TB_TOKEN)
-    client.on_message = on_message
+    def on_connect(client, userdata, flags, reason_code, *rest):
+        # Subscribe here (not once at startup) so the subscription survives paho's auto-reconnects.
+        if str(reason_code) in ("0", "Success"):
+            client.subscribe("v1/devices/me/rpc/request/+")
+        else:
+            log(f"[-] MQTT broker refused the connection: {reason_code}")
 
-    try:
-        client.connect(BROKER, 1883, 60)
-        client.subscribe("v1/devices/me/rpc/request/+")
-        client.loop_start()
-    except Exception as e:
-        log(f"[-] MQTT Connection Failed: {e}")
-        return
+    client.on_message = on_message
+    client.on_connect = on_connect
+    client.reconnect_delay_set(min_delay=2, max_delay=300)
+    if MQTT_TLS:
+        client.tls_set()
+
+    # Retry here with backoff instead of exiting, so being offline doesn't
+    # make systemd restart us (and re-hit importDevice) every 3 seconds.
+    delay = 5
+    while True:
+        if not imported:
+            imported = import_cloud_device()
+        client.username_pw_set(TB_TOKEN)
+        try:
+            client.connect(BROKER, MQTT_PORT, 60)
+            break
+        except Exception as e:
+            log(f"[-] MQTT connection failed ({e}); retrying in {delay}s")
+            time.sleep(delay)
+            delay = min(delay * 2, 300)
+    client.loop_start()
 
     completion_timer = 0
 
@@ -494,10 +694,11 @@ def main():
                 is_active_print = (klipper_state == "printing")
 
                 # --- Expanded Auto-Clear Timer Logic ---
-                if klipper_state in ["complete", "cancelled", "error"]:
+                clear_states = ["complete", "cancelled"] + (["error"] if AUTO_CLEAR_ERRORS else [])
+                if AUTO_CLEAR_SECONDS >= 0 and klipper_state in clear_states:
                     if completion_timer == 0:
                         completion_timer = time.time()
-                    elif time.time() - completion_timer > 8:
+                    elif time.time() - completion_timer > AUTO_CLEAR_SECONDS:
                         log(f"[*] Auto-clearing Klipper '{klipper_state}' state to release Cloud UI...")
                         send_gcode("SDCARD_RESET_FILE")
                         send_gcode("CLEAR_PAUSE")
@@ -559,20 +760,37 @@ def main():
                 if is_active_print and progress > 0.01:
                     time_left = int((print_dur / progress) - print_dur)
 
-                layer_info = p_stats.get("info", {})
+                layer_info = p_stats.get("info") or {}
                 cl_val = layer_info.get("current_layer")
                 raw_layer = int(cl_val) if cl_val is not None else -1
-                
+                # Real layer heights from the file's metadata, when Moonraker has them.
+                layer_meta = get_layer_meta(p_stats.get("filename", "")) if state_code in [1, 2, 5] else {}
+
                 if raw_layer >= 1:
                     current_layer = raw_layer
                 else:
                     z_pos = 0.0
                     if "position" in toolhead and len(toolhead["position"]) >= 3:
                         z_pos = float(toolhead["position"][2])
-                    current_layer = max(1, int(round(z_pos / 0.2))) if z_pos > 0.05 else 1
+                    current_layer = layer_at_z(z_pos, layer_meta) if z_pos > 0.05 else 1
 
-                if state_code == 2 and current_layer <= 1:
-                    current_layer = 10 
+                total = layer_info.get("total_layer") or layer_meta.get("layer_count")
+                if total:
+                    # Z-based guesses run high while probing or after the end-of-print lift.
+                    current_layer = min(current_layer, int(total))
+                    if raw_layer < 1 and state_code in [1, 5]:
+                        # ...so also keep them in step with how far through the file we are.
+                        current_layer = max(1, min(current_layer, int(progress * int(total)) + 1))
+
+                if state_code not in [1, 2, 5]:
+                    current_layer = 0  # idle: Z height says nothing about layers
+                elif state_code == 2:
+                    if total:
+                        current_layer = int(total)
+                    elif layer_meta.get("object_height"):
+                        current_layer = layer_at_z(layer_meta["object_height"], layer_meta)
+                    elif current_layer <= 1:
+                        current_layer = 10  # last resort when nothing reports layers; the cloud UI wants >1
 
                 filament_used_m = int(float(p_stats.get("filament_used", 0.0) or 0.0) / 1000.0)
                 cur_pos_str = get_klipper_pos()
@@ -612,7 +830,7 @@ def main():
                     "machineType": PRINTER_MODEL,
                     "deviceName": PRINTER_NAME,
                     "led_state": CURRENT_LED_STATE,
-                    "video": 1
+                    "video": 1 if VIDEO_ENABLED else 0
                 }
                 
                 attr_json = json.dumps(attr_payload)

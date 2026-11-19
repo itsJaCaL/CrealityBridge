@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import base64
+import hmac
 import json
 import logging
 import os
@@ -15,6 +16,19 @@ logger = logging.getLogger("CrealityWebRTCRelay")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TOKEN_CACHE_FILE = os.path.join(BASE_DIR, "token_cache.json")
+VIDEO_CONFIG_FILE = os.path.join(BASE_DIR, "video_config.json")
+
+def load_relay_settings():
+    try:
+        with open(VIDEO_CONFIG_FILE, "r") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    # Same-box installs only need loopback. Remote relay nodes set bind_host 0.0.0.0
+    # and must then also have a control_secret.
+    return str(cfg.get("bind_host") or "127.0.0.1"), str(cfg.get("control_secret") or "")
+
+BIND_HOST, CONTROL_SECRET = load_relay_settings()
 
 def extract_sub_from_jwt(token_str):
     try:
@@ -27,8 +41,11 @@ def extract_sub_from_jwt(token_str):
 
 def save_cached_token(token_str):
     try:
-        with open(TOKEN_CACHE_FILE, "w") as f:
+        tmp = TOKEN_CACHE_FILE + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump({"token": token_str}, f)
+        os.replace(tmp, TOKEN_CACHE_FILE)
     except Exception:
         pass
 
@@ -135,6 +152,10 @@ relay_instance = None
 
 async def handle_control(request):
     global relay_instance
+    if CONTROL_SECRET and not hmac.compare_digest(
+            request.headers.get("X-Relay-Secret", "").encode(), CONTROL_SECRET.encode()):
+        logger.warning(f"[-] Rejected /control request from {request.remote} (bad or missing secret)")
+        return web.json_response({"status": "unauthorized"}, status=401)
     try:
         data = await request.json()
         token = data.get("token")
@@ -181,5 +202,8 @@ app.on_startup.append(on_startup)
 app.router.add_post("/control", handle_control)
 
 if __name__ == "__main__":
-    logger.info("[*] Starting Video Signaling Receiver on port 8555...")
-    web.run_app(app, host="0.0.0.0", port=8555)
+    if BIND_HOST not in ("127.0.0.1", "localhost", "::1") and not CONTROL_SECRET:
+        logger.warning("[!] /control is reachable from the network with no control_secret set in video_config.json; "
+                       "anyone on the LAN can start/stop the stream.")
+    logger.info(f"[*] Starting Video Signaling Receiver on {BIND_HOST}:8555...")
+    web.run_app(app, host=BIND_HOST, port=8555)
