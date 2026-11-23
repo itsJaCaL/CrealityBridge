@@ -4,10 +4,14 @@ Creality Cloud login helper for the CrealityBridge.
 
 Replaces the manual "download the .tk key file and paste it" step:
 
-    email + password  ->  login  ->  find your printer  ->  fetch its key
+    sign in  ->  find your printer  ->  fetch its key
     ->  importDevice  ->  save jwt_token + tb_token into config.json
 
-Your password is typed at a hidden prompt, used once, and never saved.
+Two ways to sign in:
+  * Browser (works with Google, Apple, Facebook, X or email accounts):
+    the script prints a link, you sign in on any computer or phone, then
+    paste back the address the browser ends up on.
+  * Email + password, typed at a hidden prompt, used once, never saved.
 Only the tokens are written to config.json (file mode 600, .bak made first).
 
 The key (jwt_token) is short-lived (about 7 days). That is fine: the MQTT
@@ -33,12 +37,16 @@ import shutil
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
 WWW = "https://www.crealitycloud.com"
 API = "https://api.crealitycloud.com"
 ID_LOGIN = "https://id.creality.com/api/cxy/account/v2/loginV2"
+OAUTH_LOGIN = WWW + "/api/cxy/account/v2/oauthLogin"
+WEB_CLIENT_ID = "f9c302ecc29c59a0a6e921ff39a073ca"
+BROWSER_BACK = "http://localhost:18765/login"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
@@ -123,6 +131,76 @@ def login(email, password, duid):
     # confirm the session is accepted by the main API before going further
     _api(WWW, "/api/cxy/v2/common/getOssInfo", {}, uid, token, duid)
     return uid, token
+
+
+def browser_redirect_uri():
+    return WWW + "/oauth?back_url=" + urllib.parse.quote(BROWSER_BACK, safe="")
+
+
+def browser_login_link():
+    r = browser_redirect_uri()
+    return "https://id.creality.com/?" + urllib.parse.urlencode({
+        "lang": "en-US",
+        "client_id": WEB_CLIENT_ID,
+        "app_id": "cxy-gen2",
+        "redirect_uri": r,
+        "platform": "-100",
+        "back_url": r,
+        "response_type": "code",
+    })
+
+
+def code_from_pasted(text):
+    """Accept the full address the browser ended on, or just the code."""
+    text = (text or "").strip().strip('"').strip("'")
+    if "code=" in text:
+        query = urllib.parse.urlparse(text).query or text.split("?", 1)[-1]
+        return (urllib.parse.parse_qs(query).get("code") or [""])[0].strip()
+    if text and " " not in text and "/" not in text:
+        return text
+    return ""
+
+
+def browser_login(code, duid):
+    headers = {
+        "Content-Type": "application/json; charset=UTF-8",
+        "Accept": "application/json, text/plain, */*",
+        "__CXY_PLATFORM_": "6",
+        "__CXY_APP_ID_": "creality_model",
+        "__CXY_OS_LANG_": "0",
+        "__CXY_TIMEZONE_": "0",
+        "__CXY_REQUESTID_": str(uuid.uuid4()),
+        "User-Agent": UA,
+    }
+    r = browser_redirect_uri()
+    data = _request(OAUTH_LOGIN, {"clientId": WEB_CLIENT_ID, "code": code,
+                                  "redirecturi": r, "redirectUri": r}, headers)
+    if data.get("code") not in (0, None):
+        raise RuntimeError(data.get("msg") or f"browser sign-in rejected (code {data.get('code')})")
+    res = data.get("result") or {}
+    uid = str(res.get("userId") or (res.get("user_info") or {}).get("userId") or "")
+    token = str(res.get("token") or res.get("access_token") or "")
+    if not uid or not token:
+        raise RuntimeError("browser sign-in worked but no user id / token came back")
+    _api(WWW, "/api/cxy/v2/common/getOssInfo", {}, uid, token, duid)
+    return uid, token
+
+
+def ask_browser_code():
+    print()
+    print("  1. Open this link in a web browser on any computer or phone:")
+    print()
+    print("     " + browser_login_link())
+    print()
+    print("  2. Sign in (Google, Apple, Facebook, X or email all work).")
+    print("  3. The browser then shows an error like \"can't reach localhost\". That is expected.")
+    print("     Copy the whole address from the address bar (it starts with http://localhost:18765/login?code=)")
+    print()
+    while True:
+        code = code_from_pasted(input("Paste the address here: "))
+        if code:
+            return code
+        print("That doesn't contain a code. Paste the full address that starts with http://localhost:18765/login?code=")
 
 
 def list_printers(uid, token, duid):
@@ -223,6 +301,8 @@ def main():
     ap = argparse.ArgumentParser(description="Sign in to Creality Cloud and provision this bridge (no .tk file needed).")
     ap.add_argument("--config", required=True, help="path to the bridge's config.json")
     ap.add_argument("--email", help="Creality Cloud email (asked if omitted)")
+    ap.add_argument("--browser", action="store_true",
+                    help="sign in through a web browser (Google, Apple, Facebook, X or email accounts)")
     ap.add_argument("--printer-name", help="cloud name of the printer (default: printer_name from config.json)")
     ap.add_argument("--device-id", help="numeric device id; skips printer discovery")
     ap.add_argument("--model", help="model string sent to the cloud (default: printer_model from config.json)")
@@ -241,14 +321,25 @@ def main():
     want_name = (args.printer_name or cfg.get("printer_name") or "").strip().lower()
     mac = uuid.UUID(int=uuid.getnode()).hex[-12:].upper()
 
-    email = (args.email or input("Creality Cloud email: ")).strip()
-    password = getpass.getpass("Password (hidden, not saved): ")
     duid = str(uuid.uuid4())
+    use_browser = args.browser
+    if not use_browser and not args.email:
+        print("How do you want to sign in to Creality Cloud?")
+        print("  [1] Web browser  (Google, Apple, Facebook, X or email; works over SSH)")
+        print("  [2] Email and password typed here")
+        use_browser = input("Choose 1 or 2 [1]: ").strip() in ("", "1")
 
     try:
-        print("[*] Signing in...")
-        uid, token = login(email, password, duid)
-        password = ""
+        if use_browser:
+            code = ask_browser_code()
+            print("[*] Signing in...")
+            uid, token = browser_login(code, duid)
+        else:
+            email = (args.email or input("Creality Cloud email: ")).strip()
+            password = getpass.getpass("Password (hidden, not saved): ")
+            print("[*] Signing in...")
+            uid, token = login(email, password, duid)
+            password = ""
         print("[+] Signed in.")
 
         dev_id = (args.device_id or "").strip()
@@ -287,7 +378,7 @@ def main():
         tb = import_device(jwt, mac, model)
         old_tb = str(cfg.get("tb_token") or "")
         save_config(args.config, {"jwt_token": jwt, "tb_token": tb})
-        print("[+] Saved to config.json (password was not stored).")
+        print("[+] Saved to config.json (no password is ever stored).")
         if args.no_restart_hint:
             pass
         elif old_tb and old_tb == tb:

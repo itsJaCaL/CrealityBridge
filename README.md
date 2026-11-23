@@ -26,9 +26,15 @@ Whether you are running a fully custom Raspberry Pi/BTT CB1 build, or a closed-e
 2. Navigate to **Workbench** -> tap the **+** (Add Device) icon in the top right.
 3. Select **Raspberry Pi** (OctoPrint).
 
-That is all you need to do by hand. The installer signs in with your Creality Cloud email and password,
-finds the printer, and fetches its key automatically. Your password is typed once at a hidden prompt and
-is never saved; only the tokens are written to `config.json`.
+That is all you need to do by hand. The installer signs you in to Creality Cloud, finds the printer, and
+fetches its key automatically. You pick how to sign in:
+
+* **Web browser** (works with Google, Apple, Facebook, X or email accounts): the installer prints a link.
+  Open it on any computer or phone and sign in. The browser then shows a "can't reach localhost" page; that
+  is expected. Copy the address from the address bar and paste it back into the installer.
+* **Email and password**, typed once at a hidden prompt.
+
+Your password is never saved; only the tokens are written to `config.json`.
 
 > Prefer the old way? Choose option 2 in the installer to paste a `.tk` key file instead.
 
@@ -45,7 +51,7 @@ sudo bash install.sh
 
 The interactive installer will ask you for:
 
-* How to sign in (email and password, or a pasted `.tk` key file). On a reinstall you can keep the existing sign-in.
+* How to sign in (web browser, email and password, or a pasted `.tk` key file). On a reinstall you can keep the existing sign-in.
 
 * A display name for your printer.
 

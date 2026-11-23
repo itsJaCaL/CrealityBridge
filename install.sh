@@ -157,7 +157,7 @@ if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
     HAS_SIGNIN="false"
     [[ -n "$EXISTING_TB" && "$EXISTING_TB" != CC_* ]] && HAS_SIGNIN="true"
 
-    echo "  [1] Sign in with email (recommended)"
+    echo "  [1] Sign in to Creality Cloud (recommended: browser with Google/Apple/Facebook/X/email, or email + password)"
     echo "  [2] Paste a downloaded .tk key file instead"
     if [[ "$HAS_SIGNIN" == "true" ]]; then
         echo "  [3] Keep this printer's existing sign-in (reinstall/update)"
