@@ -18,6 +18,8 @@ Whether you are running a fully custom Raspberry Pi/BTT CB1 build, or a closed-e
 
 * **Flagship Controls Unlocked:** Supports target temperatures, speed/flow overrides, LED controls, part cooling fans, and live Z-axis reporting.
 
+* **Multi-colour (MMU as CFS):** With Happy Hare (ERCF, Tradrack, ...) and a multi-colour model (K2 Plus, K2 Pro, K2, Creality Hi, SPARKX i7), your gates show up in Creality Print and the Creality Cloud Uploader as CFS slots: gate 0 = T1A, gate 1 = T1B ... gate 4 = T2A. A multi-colour cloud print sets Happy Hare's tool-to-gate map (`MMU_TTG_MAP`) to the slots you chose, then starts.
+
 ## ⚙️ Installation
 
 ### Step 1: Add the device in the Creality Cloud app
@@ -55,7 +57,7 @@ The interactive installer will ask you for:
 
 * A display name for your printer.
 
-* Your printer profile type (e.g., K1 Max, Ender-3 V3, K2 Plus, etc.).
+* Your printer profile type (e.g., K2 Plus, K2 Pro, Creality Hi, SPARKX i7, K1 Max, Ender-3 V3). Creality Cloud keeps the model from a device's **first** registration; to change it, add a new Raspberry Pi in the app.
 
 * Your installation mode (Telemetry Only, All-in-One with Video, or Remote Video Node).
 
@@ -105,6 +107,7 @@ Edit these and restart the bridge (`sudo systemctl restart creality_bridge.servi
 | `led_on_gcode` / `led_off_gcode` | `""` (do nothing) | G-code for the app's LED button, e.g. `SET_LED LED=chamber WHITE=1` or `SET_PIN PIN=caselight VALUE=1`. |
 | `auto_clear_seconds` | `8` | Seconds after a print completes or is cancelled before the bridge resets Klipper's print state for the app. `-1` turns auto-clear off. |
 | `auto_clear_errors` | `false` | Also auto-clear Klipper `error` states. |
+| `cfs_mode` | `auto` | `auto` shows a Happy Hare MMU to the cloud as CFS slots and applies the slot mapping of multi-colour prints. `off` disables it. |
 | `mqtt_port` / `mqtt_tls` | `1883` / `false` | Creality's broker currently only offers plain MQTT on 1883, so commands and the device token are not encrypted in transit. These exist in case TLS becomes available. |
 
 ### Video relay security

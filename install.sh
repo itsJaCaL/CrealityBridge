@@ -181,18 +181,34 @@ if [[ "$INSTALL_MODE" == "1" || "$INSTALL_MODE" == "2" ]]; then
     PRINTER_NAME="${PRINTER_NAME:-Klipper-Printer}"
 
     echo -e "\n${C_CYAN}Select Printer Model Profile:${C_RESET}"
-    echo "  [1] K2 Plus        (Unlocks ALL flagship controls: Flow, Speed, Extrude/Retract, Fans, CFS)"
-    echo "  [2] K1 Max         (Unlocks full high-speed Klipper controls: Flow, Speed, Extrude/Retract)"
-    echo "  [3] Ender-3 V3 KE  (Standard Klipper bed-slinger profile)"
-    echo "  [4] Ender-3 S1 Pro"
-    echo "  [5] Custom Model Name"
+    echo "  (The cloud keeps the model from the FIRST registration of a device. Multi-colour models show a"
+    echo "   Happy Hare MMU (ERCF, Tradrack...) as CFS slots: gate 0 = T1A, gate 4 = T2A ...)"
+    echo "  [1]  K2 Plus        (multi-colour/CFS; all flagship controls)"
+    echo "  [2]  K2 Pro         (multi-colour/CFS)"
+    echo "  [3]  K2             (multi-colour/CFS)"
+    echo "  [4]  Creality Hi    (multi-colour/CFS)"
+    echo "  [5]  SPARKX i7      (multi-colour/CFS)"
+    echo "  [6]  K1 Max         (high-speed Klipper controls)"
+    echo "  [7]  K1C"
+    echo "  [8]  K1"
+    echo "  [9]  Ender-3 V3 KE  (bed-slinger)"
+    echo "  [10] Ender-3 V3"
+    echo "  [11] Ender-3 S1 Pro"
+    echo "  [12] Custom model name (exactly as Creality Cloud spells it)"
     read -p "Select profile [default: 1]: " MODEL_CHOICE
     case "${MODEL_CHOICE:-1}" in
         1) PRINTER_MODEL="K2 Plus" ;;
-        2) PRINTER_MODEL="K1 Max" ;;
-        3) PRINTER_MODEL="Ender-3 V3 KE" ;;
-        4) PRINTER_MODEL="Ender-3 S1 Pro" ;;
-        5) read -p "Enter exact custom model string: " PRINTER_MODEL ;;
+        2) PRINTER_MODEL="K2 Pro" ;;
+        3) PRINTER_MODEL="K2" ;;
+        4) PRINTER_MODEL="Creality Hi" ;;
+        5) PRINTER_MODEL="SPARKX i7" ;;
+        6) PRINTER_MODEL="K1 Max" ;;
+        7) PRINTER_MODEL="K1C" ;;
+        8) PRINTER_MODEL="K1" ;;
+        9) PRINTER_MODEL="Ender-3 V3 KE" ;;
+        10) PRINTER_MODEL="Ender-3 V3" ;;
+        11) PRINTER_MODEL="Ender-3 S1 Pro" ;;
+        12) read -p "Enter exact custom model string: " PRINTER_MODEL ;;
         *) PRINTER_MODEL="K2 Plus" ;;
     esac
 

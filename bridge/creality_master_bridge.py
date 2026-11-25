@@ -30,6 +30,9 @@ AUTO_CLEAR_ERRORS = bool(CONFIG.get("auto_clear_errors", False))
 # Creality's broker only listens on plain 1883 today; these exist in case that changes.
 MQTT_PORT = int(CONFIG.get("mqtt_port", 1883))
 MQTT_TLS = bool(CONFIG.get("mqtt_tls", False))
+# Multi-colour: "auto" shows a Happy Hare MMU (ERCF, Tradrack, ...) to Creality Cloud as CFS units of
+# 4 slots each (gate 0 = T1A, gate 4 = T2A, ...) and applies the cloud's slot mapping. "off" disables it.
+CFS_MODE = str(CONFIG.get("cfs_mode", "auto")).lower()
 
 # --- GLOBALS ---
 CURRENT_PRINT_ID = ""
@@ -211,6 +214,102 @@ def moonraker_post(endpoint, payload=None):
 def send_gcode(cmd):
     return moonraker_post("/printer/gcode/script", {"script": cmd})
 
+# --- MULTI-COLOUR (Happy Hare MMU shown to the cloud as a CFS) ---
+def get_mmu_gates():
+    """Gates of a Happy Hare MMU as [{gate, loaded, material, color, name, vendor}]; [] if none."""
+    if CFS_MODE == "off":
+        return []
+    fields = "num_gates,gate_status,gate_color,gate_material,gate_filament_name,gate_vendor"
+    try:
+        res = requests.get(f"{MOONRAKER}/printer/objects/query?mmu={fields}", timeout=3)
+        mmu = (res.json().get("result", {}).get("status", {}) or {}).get("mmu") or {}
+    except Exception:
+        return []
+    count = int(mmu.get("num_gates") or 0)
+
+    def at(key, i, default=""):
+        arr = mmu.get(key) or []
+        return arr[i] if i < len(arr) and arr[i] is not None else default
+
+    gates = []
+    for g in range(count):
+        material = str(at("gate_material", g)).strip()
+        status = int(at("gate_status", g, 0) or 0)  # Happy Hare: -1 unknown, 0 empty, 1/2 loaded
+        gates.append({"gate": g, "loaded": bool(material) and status != 0, "material": material,
+                      "color": re.sub(r"[^0-9A-Fa-f]", "", str(at("gate_color", g)))[-6:].upper(),
+                      "name": str(at("gate_filament_name", g)).strip(), "vendor": str(at("gate_vendor", g)).strip()})
+    return gates
+
+def gate_to_slot(gate):
+    return f"T{gate // 4 + 1}{chr(65 + gate % 4)}"
+
+def slot_to_gate(slot):
+    m = re.match(r"^T(\d+)([A-Z])$", str(slot or "").strip(), re.I)
+    return (int(m.group(1)) - 1) * 4 + ord(m.group(2).upper()) - 65 if m else None
+
+def build_cfs_list(gates):
+    """Reply to Creality Print / the cloud asking {"cfsList": 1}."""
+    boxes = []
+    for b in range((len(gates) + 3) // 4):
+        ports = []
+        for g in gates[b * 4:b * 4 + 4]:
+            on = g["loaded"]
+            ports.append({"cId": gate_to_slot(g["gate"]), "filamentType": g["material"] if on else "",
+                          "filamentsColor": "#FF" + (g["color"] or "FFFFFF") if on else "",
+                          "filamentName": g["name"] or g["material"], "vendor": g["vendor"] or "Generic",
+                          "percent": 100 if on else 0, "state": 1 if on else 0, "rfid": ""})
+        boxes.append({"id": b + 1, "portList": ports})
+    return {"cfsList": boxes}
+
+def build_boxs_info(gates):
+    """Same gates in the K2's boxsInfo layout, for clients that ask for that instead."""
+    boxes = []
+    for b in range((len(gates) + 3) // 4):
+        mats = []
+        for g in gates[b * 4:b * 4 + 4]:
+            on = g["loaded"]
+            mats.append({"id": g["gate"] % 4, "vendor": g["vendor"] or "Generic", "type": g["material"] if on else "",
+                         "color": "#0" + (g["color"] or "FFFFFF").lower() if on else "", "name": g["name"] or g["material"],
+                         "rfid": "", "percent": 100 if on else 0, "state": 1 if on else 0, "selected": 0})
+        boxes.append({"id": b + 1, "state": 1, "type": 0, "materials": mats})
+    return {"materialBoxs": boxes}
+
+def gcode_tool_usage(gcode_path):
+    """(number of filaments in the slice, indexes of the ones actually used)."""
+    try:
+        size = os.path.getsize(gcode_path)
+        with open(gcode_path, "rb") as f:
+            f.seek(max(0, size - 400_000))
+            tail = f.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return 0, []
+    types = re.search(r"^; filament_type = (.+)$", tail, re.M)
+    total = len([t for t in re.split(r"[;,]", types.group(1)) if t.strip()]) if types else 0
+    used_m = re.search(r"^; filament used \[g\] = (.+)$", tail, re.M) or re.search(r"^; filament used \[mm\] = (.+)$", tail, re.M)
+    used = [i for i, v in enumerate(re.findall(r"[0-9.]+", used_m.group(1))) if float(v) > 0] if used_m else []
+    return total, used
+
+def apply_cfs_mapping(filaments_list, gcode_path):
+    """Point each G-code tool at the MMU gate the cloud mapped it to (Happy Hare tool-to-gate map).
+    The cloud sends one entry per filament the slicer used, in slicer order."""
+    entries = [e for e in (filaments_list or []) if isinstance(e, dict)]
+    if not entries:
+        return
+    total, used = gcode_tool_usage(gcode_path)
+    if total and len(entries) == total:
+        tools = list(range(total))
+    elif used and len(entries) == len(used):
+        tools = used
+    else:
+        tools = list(range(len(entries)))
+    for tool, e in zip(tools, entries):
+        gate = slot_to_gate(e.get("filamentId")) if slot_to_gate(e.get("filamentId")) is not None else slot_to_gate(e.get("cId"))
+        if gate is None:
+            log(f"[-] CFS mapping: no slot for tool {tool}: {e!r}")
+            continue
+        log(f"[+] CFS mapping: T{tool} -> gate {gate} ({gate_to_slot(gate)}, {e.get('filamentType', '')} {e.get('filamentsColor', '')})")
+        send_gcode(f"MMU_TTG_MAP TOOL={tool} GATE={gate} QUIET=1")
+
 def get_klipper_pos():
     try:
         res = requests.get(f"{MOONRAKER}/printer/objects/query?toolhead", timeout=2)
@@ -363,6 +462,16 @@ def on_message(client, userdata, msg):
                     }))
                     rpc_reply["printId"] = CURRENT_PRINT_ID
 
+                if "cfsList" in params or "boxsInfo" in params:
+                    gates = get_mmu_gates()
+                    if gates:
+                        if "cfsList" in params:
+                            cfs = build_cfs_list(gates)
+                            rpc_reply.update(cfs)
+                            rpc_reply["result"] = cfs
+                        if "boxsInfo" in params:
+                            rpc_reply["boxsInfo"] = build_boxs_info(gates)
+
                 for key, val in params.items():
                     if key not in noisy_keys:
                         log(f"[EXECUTE] {key} -> {mask(val) if key in SECRET_KEYS else repr(redact(val))}")
@@ -457,7 +566,9 @@ def on_message(client, userdata, msg):
                         client.publish("v1/devices/me/attributes", json.dumps({"print": CLOUD_PRINT_URL}))
                         client.publish("v1/devices/me/telemetry", json.dumps({"dProgress": 0}))
 
-                        def download_and_print(url):
+                        cfs_list = params.get("filamentsList") if str(params.get("enableCfs", 0)) == "1" else None
+
+                        def download_and_print(url, cfs_list=cfs_list):
                             global IS_DOWNLOADING, CURRENT_PRINT_ID
                             # Stream to disk next to the bridge (not /tmp, which can be RAM-backed)
                             # so large prints don't have to fit in memory on 1 GB boards.
@@ -520,7 +631,10 @@ def on_message(client, userdata, msg):
                                 # Force clear leftover complete/cancel states before starting
                                 send_gcode("SDCARD_RESET_FILE")
                                 time.sleep(0.5)
-                                
+
+                                if cfs_list and CFS_MODE != "off":
+                                    apply_cfs_mapping(cfs_list, gcode_path)
+
                                 body = StreamingMultipart("file", real_name, gcode_path, {"print": "true"})
                                 up = requests.post(
                                     f"{MOONRAKER}/server/files/upload",
@@ -638,7 +752,10 @@ def main():
         pass
 
     log(f"[*] Initializing Creality Klipper Bridge ({PRINTER_NAME} as {PRINTER_MODEL})...")
-
+    gates = get_mmu_gates()
+    if gates:
+        loaded = [f"{gate_to_slot(g['gate'])}={g['material']}#{g['color']}" for g in gates if g["loaded"]]
+        log(f"[*] Multi-colour: Happy Hare MMU with {len(gates)} gates shown to the cloud as CFS. Loaded: {', '.join(loaded) or 'none'}")
     try:
         client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
     except AttributeError:
