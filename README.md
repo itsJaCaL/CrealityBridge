@@ -130,6 +130,10 @@ sudo bash install.sh --uninstall
 The uninstaller offers to remove the 2 GB `/swapfile` the video installer creates on low-RAM boards (answer No if the swapfile is your own).
 The `paho-mqtt` and `requests` pip packages are left installed because other tools may use them; remove them with `pip3 uninstall paho-mqtt requests` if you like.
 
+## ☕ Support
+
+CrealityBridge is free and open source. If it helped you, you can [buy me a spool on Ko-fi](https://ko-fi.com/itsjacal) ❤️
+
 ## 📝 License
 
 Licensed under the [GNU General Public License v3.0](LICENSE). This project is provided as-is for the 3D printing community, with no warranty.
