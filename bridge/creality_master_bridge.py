@@ -257,6 +257,7 @@ def cfs_presence():
             old = _CFS_PRESENCE["attrs"]
             changed = old.get("_sig") != sig
             _CFS_PRESENCE["attrs"] = {"cfsConnect": 1, "cfsInsert": 1, "multicolor": 1, "_sig": sig,
+                                      "materialDetect": 1, "boxsInfo": build_boxs_info(gates),
                                       "cfsUpdateTime": int(now) if changed else old.get("cfsUpdateTime", int(now))}
         else:
             _CFS_PRESENCE["attrs"] = {"cfsConnect": 0, "cfsInsert": 0} if CFS_MODE != "off" else {}
@@ -299,16 +300,20 @@ def build_slot_info(gates, slot):
             "cPressureAdvance": 0}
 
 def build_boxs_info(gates):
-    """Same gates in the K2's boxsInfo layout, for clients that ask for that instead."""
+    """Same gates in the K2's boxsInfo layout (the app reads this saved property). Box type 0 is a
+    CFS, type 1 the external spool holder; colours are "#0rrggbb"."""
     boxes = []
     for b in range((len(gates) + 3) // 4):
         mats = []
         for g in gates[b * 4:b * 4 + 4]:
             on = g["loaded"]
+            temp = g.get("temp") or 0
             mats.append({"id": g["gate"] % 4, "vendor": g["vendor"] or "Generic", "type": g["material"] if on else "",
                          "color": "#0" + (g["color"] or "FFFFFF").lower() if on else "", "name": g["name"] or g["material"],
-                         "rfid": "", "percent": 100 if on else 0, "state": 1 if on else 0, "selected": 0})
-        boxes.append({"id": b + 1, "state": 1, "type": 0, "materials": mats})
+                         "rfid": "", "percent": 100 if on else 0, "state": 1 if on else 0,
+                         "selected": 1 if g.get("selected") else 0, "editStatus": 0, "pressure": 0.04,
+                         "minTemp": max(0, temp - 20) if temp else 190, "maxTemp": temp + 20 if temp else 230})
+        boxes.append({"id": b + 1, "state": 1, "type": 0, "humidity": 0, "temp": 0, "materials": mats})
     return {"materialBoxs": boxes}
 
 def gcode_tool_usage(gcode_path):
