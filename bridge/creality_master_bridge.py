@@ -243,6 +243,25 @@ def get_mmu_gates():
                       "temp": int(at("gate_temperature", g, 0) or 0), "selected": loaded_now and g == current})
     return gates
 
+_CFS_PRESENCE = {"t": 0, "attrs": {}}
+
+def cfs_presence():
+    """Device properties the Creality app and website read to decide whether to draw a CFS
+    (cfsConnect, which they rename cfsInsert, plus multicolor). Re-checked every 30 s."""
+    now = time.time()
+    if now - _CFS_PRESENCE["t"] >= 30:
+        gates = get_mmu_gates()
+        _CFS_PRESENCE["t"] = now
+        if gates:
+            sig = json.dumps(gates, sort_keys=True)
+            old = _CFS_PRESENCE["attrs"]
+            changed = old.get("_sig") != sig
+            _CFS_PRESENCE["attrs"] = {"cfsConnect": 1, "cfsInsert": 1, "multicolor": 1, "_sig": sig,
+                                      "cfsUpdateTime": int(now) if changed else old.get("cfsUpdateTime", int(now))}
+        else:
+            _CFS_PRESENCE["attrs"] = {"cfsConnect": 0, "cfsInsert": 0} if CFS_MODE != "off" else {}
+    return {k: v for k, v in _CFS_PRESENCE["attrs"].items() if not k.startswith("_")}
+
 def gate_to_slot(gate):
     return f"T{gate // 4 + 1}{chr(65 + gate % 4)}"
 
@@ -262,7 +281,7 @@ def build_cfs_list(gates):
                           "filamentsColor": "#FF" + (g["color"] or "FFFFFF") if on else "",
                           "filamentName": g["name"] or g["material"], "vendor": g["vendor"] or "Generic",
                           "percent": 100 if on else 0, "filamentProgress": 1 if on else 0,
-                          "state": 1 if on else 0, "rfidState": 1 if on else 0, "rfid": "",
+                          "state": 1 if on else 0, "rfidState": 1 if on else 0, "rfid": "", "attach": on,
                           "selected": 1 if g.get("selected") else 0, "editStatus": 0, "remaining_length": 0})
         boxes.append({"id": b + 1, "sn": f"MMU-{b + 1}", "humidity": 0, "cfsTemp": 0, "portList": ports})
     return {"cfsList": boxes}
@@ -972,6 +991,7 @@ def main():
                     "led_state": CURRENT_LED_STATE,
                     "video": 1 if VIDEO_ENABLED else 0
                 }
+                attr_payload.update(cfs_presence())
                 
                 attr_json = json.dumps(attr_payload)
                 if attr_json != LAST_ATTR_PAYLOAD:
