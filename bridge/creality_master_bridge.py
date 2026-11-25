@@ -219,13 +219,15 @@ def get_mmu_gates():
     """Gates of a Happy Hare MMU as [{gate, loaded, material, color, name, vendor}]; [] if none."""
     if CFS_MODE == "off":
         return []
-    fields = "num_gates,gate_status,gate_color,gate_material,gate_filament_name,gate_vendor"
+    fields = "num_gates,gate_status,gate_color,gate_material,gate_filament_name,gate_vendor,gate_temperature,gate,filament"
     try:
         res = requests.get(f"{MOONRAKER}/printer/objects/query?mmu={fields}", timeout=3)
         mmu = (res.json().get("result", {}).get("status", {}) or {}).get("mmu") or {}
     except Exception:
         return []
     count = int(mmu.get("num_gates") or 0)
+    current = int(mmu.get("gate") if mmu.get("gate") is not None else -1)
+    loaded_now = str(mmu.get("filament") or "").lower() == "loaded"
 
     def at(key, i, default=""):
         arr = mmu.get(key) or []
@@ -237,7 +239,8 @@ def get_mmu_gates():
         status = int(at("gate_status", g, 0) or 0)  # Happy Hare: -1 unknown, 0 empty, 1/2 loaded
         gates.append({"gate": g, "loaded": bool(material) and status != 0, "material": material,
                       "color": re.sub(r"[^0-9A-Fa-f]", "", str(at("gate_color", g)))[-6:].upper(),
-                      "name": str(at("gate_filament_name", g)).strip(), "vendor": str(at("gate_vendor", g)).strip()})
+                      "name": str(at("gate_filament_name", g)).strip(), "vendor": str(at("gate_vendor", g)).strip(),
+                      "temp": int(at("gate_temperature", g, 0) or 0), "selected": loaded_now and g == current})
     return gates
 
 def gate_to_slot(gate):
@@ -248,7 +251,8 @@ def slot_to_gate(slot):
     return (int(m.group(1)) - 1) * 4 + ord(m.group(2).upper()) - 65 if m else None
 
 def build_cfs_list(gates):
-    """Reply to Creality Print / the cloud asking {"cfsList": 1}."""
+    """Reply to Creality Print / the cloud asking {"cfsList": 1}, with the fields Creality Print's
+    device page and send dialog read (filamentProgress 0-1, rfidState, selected, humidity, cfsTemp)."""
     boxes = []
     for b in range((len(gates) + 3) // 4):
         ports = []
@@ -257,9 +261,23 @@ def build_cfs_list(gates):
             ports.append({"cId": gate_to_slot(g["gate"]), "filamentType": g["material"] if on else "",
                           "filamentsColor": "#FF" + (g["color"] or "FFFFFF") if on else "",
                           "filamentName": g["name"] or g["material"], "vendor": g["vendor"] or "Generic",
-                          "percent": 100 if on else 0, "state": 1 if on else 0, "rfid": ""})
-        boxes.append({"id": b + 1, "portList": ports})
+                          "percent": 100 if on else 0, "filamentProgress": 1 if on else 0,
+                          "state": 1 if on else 0, "rfidState": 1 if on else 0, "rfid": "",
+                          "selected": 1 if g.get("selected") else 0, "editStatus": 0, "remaining_length": 0})
+        boxes.append({"id": b + 1, "sn": f"MMU-{b + 1}", "humidity": 0, "cfsTemp": 0, "portList": ports})
     return {"cfsList": boxes}
+
+def build_slot_info(gates, slot):
+    """Reply to {"cId": "T1A"}: the details Creality Print shows for one slot."""
+    gate = slot_to_gate(slot)
+    g = next((x for x in gates if x["gate"] == gate), None)
+    if not g or not g["loaded"]:
+        return {"cId": slot, "filamentType": "", "filamentsColor": "", "name": ""}
+    temp = g.get("temp") or 0
+    return {"cId": slot, "name": g["name"] or g["material"], "filamentType": g["material"],
+            "filamentsColor": "#FF" + (g["color"] or "FFFFFF"), "cBrandName": g["vendor"] or "Generic",
+            "nozzleTempMin": max(0, temp - 20) if temp else 190, "nozzleTempMax": temp + 20 if temp else 230,
+            "cPressureAdvance": 0}
 
 def build_boxs_info(gates):
     """Same gates in the K2's boxsInfo layout, for clients that ask for that instead."""
@@ -462,7 +480,8 @@ def on_message(client, userdata, msg):
                     }))
                     rpc_reply["printId"] = CURRENT_PRINT_ID
 
-                if "cfsList" in params or "boxsInfo" in params:
+                slot_query = method == "get" and slot_to_gate(params.get("cId")) is not None
+                if "cfsList" in params or "boxsInfo" in params or slot_query:
                     gates = get_mmu_gates()
                     if gates:
                         if "cfsList" in params:
@@ -471,6 +490,10 @@ def on_message(client, userdata, msg):
                             rpc_reply["result"] = cfs
                         if "boxsInfo" in params:
                             rpc_reply["boxsInfo"] = build_boxs_info(gates)
+                        if slot_query:
+                            info = build_slot_info(gates, str(params.get("cId")).upper())
+                            rpc_reply.update(info)
+                            rpc_reply["result"] = info
 
                 for key, val in params.items():
                     if key not in noisy_keys:
