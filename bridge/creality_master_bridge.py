@@ -53,8 +53,8 @@ def log(msg):
 SECRET_KEYS = {"token", "jwtToken", "tbToken", "jwt_token", "tb_token", "accessToken"}
 
 def mask(secret):
-    s = str(secret or "")
-    return f"<redacted ...{s[-4:]}>" if len(s) > 8 else "<redacted>"
+    """Never log any part of a secret, only whether one is set."""
+    return "<redacted>" if secret else "<empty>"
 
 def redact(obj):
     """Copy of obj with any credential-looking fields masked, safe to log."""
