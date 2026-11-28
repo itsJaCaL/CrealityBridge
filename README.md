@@ -18,7 +18,11 @@ Whether you are running a fully custom Raspberry Pi/BTT CB1 build, or a closed-e
 
 * **Flagship Controls Unlocked:** Supports target temperatures, speed/flow overrides, LED controls, part cooling fans, and live Z-axis reporting.
 
-* **Multi-colour (MMU as CFS):** With Happy Hare (ERCF, Tradrack, ...) and a multi-colour model (K2 Plus, K2 Pro, K2, Creality Hi, SPARKX i7), your gates show up in Creality Print and the Creality Cloud Uploader as CFS slots: gate 0 = T1A, gate 1 = T1B ... gate 4 = T2A. A multi-colour cloud print sets Happy Hare's tool-to-gate map (`MMU_TTG_MAP`) to the slots you chose, then starts.
+* **Multi-colour (MMU as CFS):** With Happy Hare (ERCF, Tradrack, ...) and a multi-colour model (K2 Plus, K2 Pro, K2, Creality Hi, SPARKX i7), your gates show up as CFS slots, with their material and colour: gate 0 = T1A, gate 1 = T1B ... gate 4 = T2A. A multi-colour cloud print sets Happy Hare's tool-to-gate map (`MMU_TTG_MAP`) to the slots you chose, then starts.
+  * Shows on the Creality Cloud website's Workbench, in the Creality Cloud Uploader and Cloud Browser OrcaSlicer plugins, and in cloud print dialogs.
+  * Known limit: the Creality Cloud phone app (7.3.x) still shows its "Learn CFS" panel for bridge printers. Printing works; only the CFS view is missing.
+
+* **Print from the Workbench:** Files already on the printer can be printed from the Creality Cloud app or website. The bridge reads the file's filaments for the app, so multi-colour files can be mapped to CFS slots before printing.
 
 ## ⚙️ Installation
 
