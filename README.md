@@ -4,6 +4,8 @@ Connect **any** Klipper/Moonraker 3D printer to the Creality Cloud ecosystem.
 
 Whether you are running a fully custom Raspberry Pi/BTT CB1 build, or a closed-ecosystem device like the **Creality Sonic Pad** or **Nebula Pad**, this bridge translates native Klipper/Moonraker telemetry into Creality Cloud's MQTT protocol. It enables full remote control, slicing, and monitoring from the Creality Cloud mobile app or web browser.
 
+> ⭐ **If it works for you, a star helps others find it.**
+
 ## ✨ Features
 
 * **Universal Compatibility:** Works on any device running Moonraker (Raspberry Pi, CB1, TrueNAS/Proxmox VMs, Hacked Sonic Pad, Nebula Pad).
