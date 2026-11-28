@@ -284,8 +284,12 @@ def build_cfs_list(gates):
                           "percent": 100 if on else 0, "filamentProgress": 1 if on else 0,
                           "state": 1 if on else 0, "rfidState": 1 if on else 0, "rfid": "", "attach": on,
                           "selected": 1 if g.get("selected") else 0, "editStatus": 0, "remaining_length": 0})
-        boxes.append({"id": b + 1, "sn": f"MMU-{b + 1}", "humidity": 0, "cfsTemp": 0, "portList": ports})
-    return {"cfsList": boxes}
+        boxes.append({"id": b + 1, "sn": f"MMU-{b + 1}", "type": "MF003", "drierState": 0, "humidity": 0,
+                      "cfsTemp": 0, "materialBinStatus": [], "portList": ports})
+    # cfsName/type "MF003" = a standard CFS; the phone app needs the model code to draw the boxes.
+    return {"cfsList": boxes, "cfsName": "MF003", "autoRefill": 0, "otherCfs": [],
+            "rackFilament": {"cId": "T0A", "filamentType": "", "filamentsColor": "", "attach": False,
+                             "filamentProgress": 0, "state": 0, "rfidState": 0, "selected": 0, "editStatus": 0}}
 
 def build_slot_info(gates, slot):
     """Reply to {"cId": "T1A"}: the details Creality Print shows for one slot."""
@@ -330,6 +334,54 @@ def gcode_tool_usage(gcode_path):
     used_m = re.search(r"^; filament used \[g\] = (.+)$", tail, re.M) or re.search(r"^; filament used \[mm\] = (.+)$", tail, re.M)
     used = [i for i, v in enumerate(re.findall(r"[0-9.]+", used_m.group(1))) if float(v) > 0] if used_m else []
     return total, used
+
+_GCODES_ROOT = {"path": None}
+
+def gcodes_root():
+    if not _GCODES_ROOT["path"]:
+        try:
+            roots = requests.get(f"{MOONRAKER}/server/files/roots", timeout=3).json().get("result") or []
+            _GCODES_ROOT["path"] = next((r.get("path") for r in roots if r.get("name") == "gcodes"), None)
+        except Exception:
+            return None
+    return _GCODES_ROOT["path"]
+
+def parse_gcode_for_app(target):
+    """Reply to the app's queryParseGCode (sent before printing a file): state 2 = done, with the
+    slicer's filaments so the app can map them to CFS slots. state 3 = couldn't read it."""
+    t = str(target or "")
+    reply = {"state": 2, "url": t, "progress": 100, "filamentsList": [], "filamentColorUsedList": []}
+    if t.startswith("http"):
+        return reply                      # cloud file: nothing to read locally, let the app go on
+    root = gcodes_root()
+    rel = re.sub(r"^/(local|usb)/?", "", t).lstrip("/")
+    path = os.path.realpath(os.path.join(root or "", rel))
+    if not root or not path.startswith(os.path.realpath(root) + os.sep) or not os.path.isfile(path):
+        reply["state"] = 3
+        return reply
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, size - 400_000))
+            tail = f.read().decode("utf-8", errors="ignore")
+    except Exception:
+        reply["state"] = 3
+        return reply
+    def field(name):
+        m = re.search(rf"^; {name} = (.+)$", tail, re.M)
+        return [x.strip() for x in re.split(r"[;,]", m.group(1))] if m else []
+    types, colours, dias = field("filament_type"), field("filament_colour"), field("filament_diameter")
+    grams = [float(x) for x in re.findall(r"[0-9.]+", ";".join(field(r"filament used \[g\]")))]
+    total, used = gcode_tool_usage(path)
+    idx = used or list(range(len(types)))
+    for i in idx:
+        col = colours[i] if i < len(colours) else "#FFFFFF"
+        reply["filamentsList"].append({
+            "filamentId": str(i + 1), "filamentType": types[i] if i < len(types) else "PLA",
+            "filamentsColor": col, "filamentColor": col,
+            "filamentDiameter": float(dias[i]) if i < len(dias) and dias[i] else 1.75})
+        reply["filamentColorUsedList"].append(grams[i] if i < len(grams) else 0)
+    return reply
 
 def apply_cfs_mapping(filaments_list, gcode_path):
     """Point each G-code tool at the MMU gate the cloud mapped it to (Happy Hare tool-to-gate map).
@@ -518,6 +570,11 @@ def on_message(client, userdata, msg):
                             info = build_slot_info(gates, str(params.get("cId")).upper())
                             rpc_reply.update(info)
                             rpc_reply["result"] = info
+
+                if "queryParseGCode" in params:
+                    parsed = parse_gcode_for_app(params.get("queryParseGCode"))
+                    rpc_reply.update(parsed)
+                    rpc_reply["result"] = parsed
 
                 for key, val in params.items():
                     if key not in noisy_keys:
